@@ -1,0 +1,11 @@
+# GitGuardian/ggshield configuration.
+# The CI workflow runs its Postgres service container with the image's
+# standard dummy credentials (postgres/postgres) on the runner's own
+# localhost — they are ephemeral, job-scoped, and never touch real
+# databases. Ignore the pattern so pushes are not blocked.
+version: 2
+
+secret:
+  ignored_matches:
+    - match: postgresql://postgres:postgres@localhost:5432/brikoh_test
+      name: CI postgres service container (ephemeral localhost creds)

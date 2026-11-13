@@ -1,0 +1,9 @@
+1. feat/error-messages-auth 
+2. feat/error-messages-core (middleware affects all)
+3. feat/error-messages-staff
+4. feat/error-messages-products
+5. feat/error-messages-orders
+6. feat/error-messages-payments
+7. feat/error-messages-purchasing
+8. feat/error-messages-customers
+9. feat/error-messages-settings

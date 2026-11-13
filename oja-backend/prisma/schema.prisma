@@ -1,0 +1,2056 @@
+// Brikoh core schema — every subsequent phase builds on this.
+//
+// Conventions (see RULES.md):
+// - Money is Decimal(10,2); never floats.
+// - Every timestamp is timestamptz (UTC) — Prisma defaults to naive
+//   timestamp(3), so @db.Timestamptz(3) is explicit on EVERY DateTime.
+// - Every tenant-scoped model carries an indexed store_id.
+// - onDelete choices are deliberate; each is justified inline.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// === Enums ===============================================================
+
+enum OrderStatus {
+  PENDING
+  AWAITING_PAYMENT
+  PAID
+  SHIPPED
+  CANCELLED
+  REFUNDED
+  FAILED
+}
+
+enum SubscriptionTier {
+  STARTER
+  PRO
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+}
+
+enum StaffRole {
+  ADMIN
+  MANAGER
+  STAFF
+}
+
+enum InviteTokenStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PAID
+  VOID
+}
+
+// What a NotificationDispatch row alerted about. LOW_STOCK and
+// EXPIRING_SOON are raised by the scheduled sweep; PAYMENT_RECEIVED is
+// raised the moment money arrives (checkout payment, credit repayment,
+// invoice payment).
+enum NotificationKind {
+  LOW_STOCK
+  EXPIRING_SOON
+  PAYMENT_RECEIVED
+  PAYMENT_CLAIMED
+  SUPPORT_REPLY
+  // Customer-facing receipt email (sent to the buyer, not the merchant).
+  RECEIPT
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum TicketAuthorType {
+  MERCHANT
+  ADMIN
+}
+
+enum StockReason {
+  // The seed movement written at product creation when the merchant
+  // supplies a starting stock (createProduct's initialStock). Never
+  // accepted via the HTTP adjustment endpoint — it exists only inside
+  // the create transaction.
+  INITIAL_STOCK
+  SALE
+  MANUAL_ADJUSTMENT
+  RESTOCK
+  REFUND
+  WRITE_OFF
+  // The two legs of a branch-to-branch transfer, written in ONE
+  // transaction by transferStock: the source branch records
+  // TRANSFER_OUT (a decrement), the destination records TRANSFER_IN
+  // (an increment). They cancel out on the product-level cached total.
+  TRANSFER_OUT
+  TRANSFER_IN
+}
+
+// How a POS sale was paid (dashboard orders service). Null on storefront
+// orders: those always go through a payment provider, whose channel is
+// only known later (payments settlements module).
+enum PaymentMethod {
+  CASH
+  TRANSFER
+  CREDIT
+  CARD
+}
+
+// Where an order came from. STOREFRONT/POS are set by the sale
+// workflows; DIRECT/SOCIAL/MARKETPLACE/REFERRAL come from the
+// storefront checkout's optional `origin` attribute (attribution tags).
+// Powers the revenue-by-channel breakdown in analytics.
+enum OrderSource {
+  STOREFRONT
+  POS
+  DIRECT
+  SOCIAL
+  MARKETPLACE
+  REFERRAL
+}
+
+// Where a Customer row first came from. Written once at creation; the
+// dashboard's analytics surfaces the mix.
+enum CustomerSource {
+  POS
+  MANUAL
+  STOREFRONT
+  IMPORTED
+}
+
+enum WebhookStatus {
+  PENDING
+  PROCESSED
+  FAILED
+}
+
+// How a managed discount reduces a cart: a percentage of the pre-discount
+// line total, or a flat amount off the cart. Cart-wide only (no
+// per-product scope in this phase).
+enum DiscountType {
+  PERCENTAGE
+  FIXED
+}
+
+// Purchase-order lifecycle (purchases module): DRAFT orders are
+// editable/deletable and carry no number; issuing assigns the
+// store-sequential PO-#### and freezes the order; receiving advances
+// PARTIALLY_RECEIVED until every line is in (RECEIVED); CANCELLED is
+// entered from DRAFT/ORDERED only, and only while no receipts exist.
+enum PurchaseOrderStatus {
+  DRAFT
+  ORDERED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+// How a wallet entry moves the balance: CREDIT adds, DEBIT subtracts.
+// The wallet is fed exclusively by CARD/online orders paid through the
+// provider webhook (charge.success); CASH/TRANSFER/CREDIT sales never
+// touch it. Currency is always NGN (Paystack transfers are NGN-only).
+enum WalletEntryType {
+  CREDIT
+  DEBIT
+}
+
+// The document that justifies a wallet movement.
+enum WalletEntrySource {
+  ORDER_PAYMENT
+  WITHDRAWAL
+  WITHDRAWAL_REVERSAL
+  ADJUSTMENT
+}
+
+// Withdrawal lifecycle: REQUESTED is the wallet debit (debit-on-request);
+// PROCESSING once the provider accepts the transfer; SUCCESS when
+// transfer.success confirms; FAILED when transfer.failed — the debited
+// amount is credited back as a WITHDRAWAL_REVERSAL entry. A FAILED
+// request-time provider error also lands here via reversal.
+enum PayoutStatus {
+  REQUESTED
+  PROCESSING
+  SUCCESS
+  FAILED
+}
+
+// Categorical business profile, chosen at onboarding.
+enum StoreBusinessType {
+  RETAIL
+  FOOD_AND_BEVERAGE
+  FASHION_AND_WEARABLES
+  HEALTH_AND_BEAUTY
+  ELECTRONICS
+  PROFESSIONAL_SERVICES
+  AGRICULTURE
+  OTHER
+}
+
+// Catalog visibility. DRAFT products are invisible to public checkout
+// (enforced in the orders service) and exist for merchants to complete
+// before going live; PUBLISHED products are buyable. New products start
+// DRAFT; the merchant publishes explicitly.
+enum ProductStatus {
+  DRAFT
+  PUBLISHED
+}
+
+enum ProductImportStatus {
+  PENDING
+  CONFIRMED
+}
+
+enum ProductImportRowStatus {
+  NEW
+  DUPLICATE
+  ERROR
+}
+
+// Paystack-supported currencies with a 2-decimal minor unit (kobo/pesewa/
+// cent) — the server's ×100 amount conversion is exact for every value.
+// XOF (0-decimal) is deliberately excluded.
+enum Currency {
+  NGN
+  USD
+  GHS
+  KES
+  ZAR
+}
+
+// Operating-expense categories for the P&L report (dashboard-reports).
+// The store records what it spent and where; the report buckets by this
+// value. EXTENDING the enum needs a migration (unlike permissions).
+enum ExpenseCategory {
+  RENT
+  TRANSPORT
+  PACKAGING
+  SALARIES
+  MARKETING
+  UTILITIES
+  OTHER
+}
+
+// === Models ==============================================================
+
+// Pure identity/login record. NOT tenant-scoped — no store_id.
+model Account {
+  id              String    @id @default(uuid(7)) @db.Uuid
+  email           String    @unique
+  // Null for accounts created via Google sign-in (they have no password);
+  // password login rejects these accounts (INVALID_CREDENTIALS).
+  passwordHash    String?
+  // Google's stable subject id, set when the account is created or linked
+  // through "Sign in with Google". Unique so one Google identity maps to
+  // exactly one local account.
+  googleSub       String?   @unique
+  // Profile fields are populated at registration (required there) but
+  // kept nullable in the database so invitee-created accounts (which
+  // accept with only a password) remain valid until a profile phase.
+  firstName       String?
+  lastName        String?
+  phone           String?
+  // Set by the email-verification flow (POST /api/public/auth/verify).
+  // Null until the account proves ownership of its email address; the
+  // onboarding endpoint rejects unverified accounts with
+  // 403 VERIFICATION_REQUIRED. Pre-existing accounts (predating email
+  // verification) keep null and are unaffected — only onboarding gates
+  // on this.
+  emailVerifiedAt DateTime? @db.Timestamptz(3)
+  createdAt       DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime  @updatedAt @db.Timestamptz(3)
+
+  owner              Owner?
+  staffMembers       StaffMember[]
+  refreshTokens      RefreshToken[]
+  verificationTokens AccountVerificationToken[]
+  supportTicketsRaised SupportTicket[] @relation("TicketRaisedBy")
+  ticketMessages TicketMessage[] @relation("TicketMessageAccountAuthor")
+}
+
+// Single-use email-verification tokens. Raw token values (like invite
+// tokens) are stored and matched exactly; consumption is a usedAt
+// timestamp guarded by an updateMany race so two concurrent link clicks
+// verify exactly once. Expired and used rows are removed by the token
+// cleanup service function.
+model AccountVerificationToken {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  token     String    @unique
+  accountId String    @db.Uuid
+  account   Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  expiresAt DateTime  @db.Timestamptz(3)
+  usedAt    DateTime? @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@index([accountId])
+}
+
+// Single-use refresh sessions. Only tokenHash (bcrypt, like passwords) is
+// stored — the raw `rt_<tokenId>.<secret>` value is shown to the client
+// exactly once. Rotation revokes the presented row and issues a new one;
+// presenting an already-revoked row again is treated as possible theft.
+// Revoked rows are kept for 30 days (reuse-detection audit trail), then
+// removed by the token cleanup service function.
+model RefreshToken {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  accountId String    @db.Uuid
+  account   Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  tokenHash String
+  expiresAt DateTime  @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  revokedAt DateTime? @db.Timestamptz(3)
+
+  @@index([accountId])
+}
+
+// The tenant root. No store_id — a Store IS the tenant.
+// subdomain is globally unique when set; case-normalization is enforced
+// at the service layer, not by the DB. Every NEW store receives one
+// automatically at onboarding (derived from the store name by
+// src/lib/slugs.ts); null only for stores predating auto-generation —
+// such stores are dashboard-only and unreachable by public checkout.
+model Store {
+  id                   String            @id @default(uuid(7)) @db.Uuid
+  name                 String
+  subdomain            String?           @unique
+  // Business profile collected during onboarding.
+  businessType         StoreBusinessType
+  location             String
+  currency             Currency          @default(NGN)
+  businessPhone        String
+  // Optional custom domain — only settable for tiers whose feature flags
+  // include customDomain (enforced at the service layer). Null = default
+  // brikoh subdomain hosting; nullable so existing stores don't break.
+  customDomain         String?           @unique
+  // Merchant notification preferences (dashboard settings module): JSON
+  // of known boolean toggles (lowStockAlerts, paymentAlerts,
+  // expiringSoonAlerts). Null/unset keys default to enabled at the
+  // service layer — alert toggles opt out, never in.
+  notificationSettings Json?
+  // Storefront configuration (Website Studio): JSON of the public
+  // storefront's presentation settings — template, tagline, hero
+  // copy, accent color (a member of the fixed swatch, validated by the
+  // service layer), WhatsApp button, social links, badge toggle. Null/
+  // unset keys default at the service layer; the public storefront reads
+  // them via GET /api/public/storefront/:subdomain.
+  storefrontSettings   Json?
+  // Store-sequential invoice numbering: bumped inside the issue
+  // transaction, so INV-#### numbers never repeat per store.
+  invoiceCounter       Int               @default(0)
+  // Store-sequential purchase-order numbering: bumped inside the issue
+  // transaction, so PO-#### numbers never repeat per store.
+  purchaseOrderCounter Int               @default(0)
+  // Store-sequential order numbering: bumped inside the order-create
+  // transaction, so ORD-#### numbers never repeat per store.
+  orderCounter Int                       @default(0)
+  createdAt            DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt            DateTime          @updatedAt @db.Timestamptz(3)
+
+  // Points at the store's ACTIVE subscription. SetNull so a store can
+  // exist (and be migrated) without a subscription; billing history is
+  // kept in the Subscription table via storeId.
+  subscriptionId      String?        @unique @db.Uuid
+  subscription        Subscription?  @relation("ActiveSubscription", fields: [subscriptionId], references: [id], onDelete: SetNull)
+  subscriptionHistory Subscription[] @relation("SubscriptionHistory")
+
+  // The branch that public checkout and staff sales default to. Every
+  // store starts with one "Main Branch" (created at onboarding; backfilled
+  // by the branches migration); null only if that branch was deleted (the
+  // service layer refuses to delete the default branch, so in practice it
+  // is always set). SetNull as a safety backstop, never the normal path.
+  defaultBranchId String?  @unique @db.Uuid
+  defaultBranch   Branch?  @relation("StoreDefaultBranch", fields: [defaultBranchId], references: [id], onDelete: SetNull)
+  branches        Branch[] @relation("StoreBranches")
+
+  // The storefront template applied to the store's public storefront.
+  // Null = the client renders its default template until the merchant
+  // picks one. Selection is validated against the tier's visible set at
+  // the service layer (dashboard-store-templates.md). Restrict: a
+  // template with stores attached must never vanish from under them.
+  templateId       String?        @db.Uuid
+  template         StoreTemplate? @relation(fields: [templateId], references: [id], onDelete: Restrict)
+  // Per-store brand customization layered on the chosen template
+  // (accent color, logo, hero text, announcement bar). Shape is enforced
+  // by a strict zod schema in the templates service (new fields are
+  // additive — no migration), null = all template defaults.
+  templateSettings Json?
+
+  owner                     Owner?
+  staffMembers              StaffMember[]
+  inviteTokens              InviteToken[]
+  products                  Product[]
+  productVariants           ProductVariant[]
+  productOptions            ProductOption[]
+  productOptionValues       ProductOptionValue[]
+  locations                 Location[]
+  categories                Category[]
+  units                     Unit[]
+  branchStocks              BranchStock[]
+  productImports            ProductImport[]
+  stockLedgerEntries        StockLedgerEntry[]
+  customers                 Customer[]
+  customerGroups            CustomerGroup[]
+  discounts                 Discount[]
+  campaigns                 Campaign[]
+  couponRedemptions         CouponRedemption[]
+  orders                    Order[]
+  invoices                  Invoice[]
+  webhookEvents             WebhookEvent[]
+  orderLineItems            OrderLineItem[]
+  invoiceLineItems          InvoiceLineItem[]
+  paymentCredentials        PaymentCredential[]
+  creditRepayments          CreditRepayment[]
+  adminAuditLogs            AdminAuditLog[]
+  storeActivityLogs         StoreActivityLog[]
+  invoicePayments           InvoicePayment[]
+  subscriptionPayments      SubscriptionPayment[]
+  notificationDispatches    NotificationDispatch[]
+  suppliers                 Supplier[]
+  purchaseOrders            PurchaseOrder[]
+  purchaseOrderReceipts     PurchaseOrderReceipt[]
+  purchaseOrderPayments     PurchaseOrderPayment[]
+  purchaseOrderLineItems    PurchaseOrderLineItem[]
+  purchaseOrderReceiptLines PurchaseOrderReceiptLine[]
+  wallet                    StoreWallet?
+  walletEntries             WalletEntry[]
+  bankAccounts              BankAccount[]
+  deliveryOptions           DeliveryOption[]
+  payouts                   Payout[]
+  expenses                  Expense[]
+  supportTickets            SupportTicket[]
+  announcementViews         AnnouncementView[]
+
+  @@index([subscriptionId])
+  @@index([templateId])
+}
+
+// The dev-controlled storefront template catalog. NOT tenant-scoped: it
+// is platform data (seeded by the migration and seed.ts), not merchant
+// content. Visibility is tier-gated by COUNT: the catalog is ordered by
+// sortOrder and the first N (the plan's templateCap) are visible — a
+// superset, so STARTER sees templates 1-3, PRO 1-5, ENTERPRISE all.
+// isActive=false hides a template from every tier without deleting it
+// (deleting would violate the Restrict on Store.templateId).
+model StoreTemplate {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  slug        String   @unique
+  name        String
+  description String?
+  // Storefront preview image (uploaded asset). Null until previews are
+  // produced; the client renders a placeholder in the meantime.
+  previewUrl  String?  @db.VarChar(2048)
+  // Catalog order — the tier count cut happens on this ordering.
+  sortOrder   Int
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  stores Store[]
+
+  @@index([sortOrder])
+}
+
+// Single owner per store (storeId unique). Restrict on account: an
+// account with an ownership record cannot be deleted until ownership is
+// transferred. Cascade on store: the tenant's ownership dies with it.
+model Owner {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  accountId String   @unique @db.Uuid
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  storeId   String   @unique @db.Uuid
+  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([storeId])
+  @@index([accountId])
+}
+
+// Cascade on account: deleting an account also removes its staff access
+// records (privacy: identity data must not outlive the account).
+// SetNull on inviteToken: an invite can expire/be deleted without
+// affecting the staff member it created.
+model StaffMember {
+  id            String       @id @default(uuid(7)) @db.Uuid
+  accountId     String       @db.Uuid
+  account       Account      @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  storeId       String       @db.Uuid
+  store         Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  role          StaffRole
+  // Feature-level permission flags; the allowlist is enforced by zod at
+  // the service layer. Kept as text[] so new permissions need no migration.
+  permissions   String[]     @default([])
+  // Deactivated members keep their row and history (ledger entries,
+  // sales, activity) but cannot sign in and have their refresh tokens
+  // revoked at deactivation time. Re-activation restores login without
+  // touching role/permissions.
+  isActive      Boolean      @default(true)
+  inviteTokenId String?      @unique @db.Uuid
+  inviteToken   InviteToken? @relation(fields: [inviteTokenId], references: [id], onDelete: SetNull)
+  createdAt     DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime     @updatedAt @db.Timestamptz(3)
+
+  stockLedgerEntries            StockLedgerEntry[]
+  soldOrders                    Order[]                @relation("SoldOrders")
+  storeActivityLogs             StoreActivityLog[]
+  productImports                ProductImport[]
+  creditRepayments              CreditRepayment[]
+  invoicePayments               InvoicePayment[]
+  createdPurchaseOrders         PurchaseOrder[]
+  recordedPurchaseOrderReceipts PurchaseOrderReceipt[]
+  recordedPurchaseOrderPayments PurchaseOrderPayment[]
+
+  @@index([storeId])
+  @@index([accountId])
+}
+
+model InviteToken {
+  id        String            @id @default(uuid(7)) @db.Uuid
+  token     String            @unique
+  email     String
+  storeId   String            @db.Uuid
+  store     Store             @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  role      StaffRole
+  status    InviteTokenStatus @default(PENDING)
+  expiresAt DateTime          @db.Timestamptz(3)
+  createdAt DateTime          @default(now()) @db.Timestamptz(3)
+
+  staffMember StaffMember?
+
+  @@index([storeId])
+  @@index([email])
+}
+
+// Merchant bring-your-own-keys for the payment provider. The secret key
+// is encrypted at rest (lib/secrets.ts, AES-256-GCM with the platform
+// master key) and NEVER returned in full by any endpoint. provider is a
+// String, not an enum: new providers (OPAY, MONNIFY…) must be addable
+// without a migration — the allowlist is enforced by zod in the
+// payments service layer. Cascade on store: tenant deletion removes its
+// credentials.
+model PaymentCredential {
+  id                 String   @id @default(uuid(7)) @db.Uuid
+  storeId            String   @db.Uuid
+  store              Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  provider           String
+  publicKey          String
+  secretKeyEncrypted String
+  createdAt          DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime @updatedAt @db.Timestamptz(3)
+
+  @@unique([storeId, provider])
+  @@index([storeId])
+}
+
+model Product {
+  id                String        @id @default(uuid(7)) @db.Uuid
+  storeId           String        @db.Uuid
+  store             Store         @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  name              String
+  // Product-level SKU (variants carry their own `sku`). Optional,
+  // free-form — the service layer trims and caps length.
+  sku               String?       @db.VarChar(64)
+  price             Decimal       @db.Decimal(10, 2)
+  // What the merchant paid their supplier — distinct from `price` (the
+  // selling price). Nullable and read nowhere yet: many merchants won't
+  // track costs, and profit reporting is a later phase. Only the field's
+  // existence and settability are in scope here.
+  costPrice         Decimal?      @db.Decimal(10, 2)
+  description       String?
+  images            String[]      @default([])
+  // The primary photo shown in listings and checkout. Distinct from
+  // `images` (the gallery); null until the merchant chooses a cover.
+  // Set at create/update; enforced nowhere beyond URL validation — a
+  // DRAFT product may ship without one.
+  coverImageUrl     String?       @db.VarChar(2048)
+  // Pricing: `price` is the selling price; `discountPrice`, when set, is
+  // the promotional price shown instead. The service layer rejects a
+  // discountPrice >= price (a discount must discount).
+  discountPrice     Decimal?      @db.Decimal(10, 2)
+  // Stock-alert trigger: when cached stock drops to or below this value
+  // after a decrement, a LOW_STOCK notification is raised (notifications
+  // module). Null = no alerts for this product.
+  lowStockThreshold Int?
+  // Perishable-goods expiry. Null = non-expiring. The daily expiry job
+  // scans expiryDate <= now + grace window to raise EXPIRING_SOON
+  // notifications.
+  expiryDate        DateTime?     @db.Timestamptz(3)
+  status            ProductStatus @default(DRAFT)
+  // Catalog taxonomy. SetNull: deleting a category/unit must never
+  // destroy the products attached to it — the product simply becomes
+  // uncategorized. Membership is validated by the service layer (the id
+  // must belong to the tenant), never trusted from client input.
+  categoryId        String?       @db.Uuid
+  category          Category?     @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  unitId            String?       @db.Uuid
+  unit              Unit?         @relation(fields: [unitId], references: [id], onDelete: SetNull)
+  // Current stock, derived from the ledger over time but cached here for
+  // fast reads. NEVER written directly — every change goes through the
+  // stock-adjustment transaction (ledger.service), which atomically
+  // enforces quantity >= 0 (DB CHECK + conditional UPDATE).
+  // A product WITH variants keeps this at 0: its stock lives per-variant
+  // on ProductVariant.quantity, and this counter is only meaningful for
+  // variant-less products (the "single number" case).
+  quantity          Int           @default(0)
+  deletedAt         DateTime?     @db.Timestamptz(3)
+  createdAt         DateTime      @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime      @updatedAt @db.Timestamptz(3)
+
+  stockLedgerEntries        StockLedgerEntry[]
+  orderLineItems            OrderLineItem[]
+  invoiceLineItems          InvoiceLineItem[]
+  variants                  ProductVariant[]
+  options                   ProductOption[]
+  branchStocks              BranchStock[]
+  purchaseOrderLineItems    PurchaseOrderLineItem[]
+  purchaseOrderReceiptLines PurchaseOrderReceiptLine[]
+
+  @@index([storeId])
+  // Cursor pagination on list (createdAt DESC, id DESC tie-break).
+  @@index([storeId, createdAt])
+  @@index([categoryId])
+  @@index([unitId])
+  // SKU lookups (import matching, search) without a global index scan.
+  @@index([storeId, sku])
+}
+
+// Merchant-defined product groupings ("Beverages", "Men's Wear"…).
+// Store-scoped; the (storeId, name) pair is unique so the catalog stays
+// typo-free per tenant. Deleting a category keeps its products
+// (Product.categoryId is SetNull) — soft deletion is a later phase.
+model Category {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  storeId     String   @db.Uuid
+  store       Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  products Product[]
+
+  @@unique([storeId, name])
+  @@index([storeId])
+}
+
+// Merchant-defined selling units ("kg", "dozen", "pack"). Store-scoped
+// like Category; deleting a unit keeps its products (SetNull).
+model Unit {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  storeId   String   @db.Uuid
+  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  name      String
+  symbol    String?
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  products Product[]
+
+  @@unique([storeId, name])
+  @@index([storeId])
+}
+
+// One of several sellable variations of a product ("Red - Large").
+// Zero variants = today's single-SKU behavior, unchanged. When variants
+// exist, EVERY stock movement must name a variant — Product.quantity is
+// meaningless for such products (per-variant stock is the only truth).
+// storeId is denormalized for tenant-scoping consistency with every other
+// tenant-scoped table (the tenant auto-inject wrapper needs it on each
+// table and it keeps variant queries tenant-filterable without a join);
+// parent-product membership is enforced by the service layer on every
+// write, never by client input.
+// Cascade on product: variants are part of the product and die with it
+// (products are soft-deleted in normal operation, so this fires only on
+// tenant-wide cascade).
+model ProductVariant {
+  id           String   @id @default(uuid(7)) @db.Uuid
+  storeId      String   @db.Uuid
+  store        Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  productId    String   @db.Uuid
+  product      Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  name         String
+  // Overrides the parent product's price when set; otherwise the
+  // effective price is product.price.
+  sellingPrice Decimal? @db.Decimal(10, 2)
+  sku          String?
+  // Cached per-variant stock — the same ledger discipline as
+  // Product.quantity: NEVER written directly, every change goes through
+  // the stock-adjustment transaction (ledger.service) which atomically
+  // enforces quantity >= 0.
+  quantity     Int      @default(0)
+  // Soft-retire: set when the variant is archived (hidden from the public
+  // storefront and rejected for sale), null while sellable. History and
+  // stock rows are kept (order/ledger FKs are Restrict), and an archived
+  // variant can still receive stock adjustments (write-offs).
+  archivedAt   DateTime? @db.Timestamptz(3)
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(3)
+
+  stockLedgerEntries        StockLedgerEntry[]
+  orderLineItems            OrderLineItem[]
+  branchStocks              BranchStock[]
+  purchaseOrderLineItems    PurchaseOrderLineItem[]
+  purchaseOrderReceiptLines PurchaseOrderReceiptLine[]
+  optionValues              ProductVariantOptionValue[]
+
+  @@index([storeId])
+  @@index([productId])
+  @@index([productId, createdAt])
+  @@index([productId, archivedAt])
+}
+
+// A product-scoped variant dimension ("Colour", "Size") — merchant-named,
+// max TWO per product (enforced at the service layer), values are free text
+// so merchants are never limited to a platform colour/size list.
+model ProductOption {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  storeId   String   @db.Uuid
+  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  productId String   @db.Uuid
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  name      String   @db.VarChar(40)
+  sortOrder Int
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  values ProductOptionValue[]
+
+  @@unique([productId, name])
+  @@index([storeId])
+  @@index([productId, sortOrder])
+}
+
+// One value under an option ("Red" under "Colour"). Cascade on the option:
+// removing a dimension removes its values; the join rows cascade with them
+// (the archived variant keeps its derived `name` as the human label).
+model ProductOptionValue {
+  id        String        @id @default(uuid(7)) @db.Uuid
+  storeId   String        @db.Uuid
+  store     Store         @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  optionId  String        @db.Uuid
+  option    ProductOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  value     String        @db.VarChar(40)
+  sortOrder Int
+  createdAt DateTime      @default(now()) @db.Timestamptz(3)
+
+  variantLinks ProductVariantOptionValue[]
+
+  @@unique([optionId, value])
+  @@index([storeId])
+  @@index([optionId, sortOrder])
+}
+
+// Join: one row per dimension per variant — a "Red / M" variant links to the
+// "Red" Colour value and the "M" Size value. Cascade both ways so removing a
+// value (or the variant) cleans up the link; order history references the
+// variant, not the value, so nothing financial is lost.
+model ProductVariantOptionValue {
+  variantId     String             @db.Uuid
+  variant       ProductVariant     @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  optionValueId String             @db.Uuid
+  optionValue   ProductOptionValue @relation(fields: [optionValueId], references: [id], onDelete: Cascade)
+
+  @@id([variantId, optionValueId])
+  @@index([optionValueId])
+}
+
+// Tenant-scoped storefront locations. Counted by the plan's locationCap
+// (create-location enforcement reads this); the store's own `Store.location`
+// string is the primary storefront and is NOT counted.
+model Location {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  storeId   String   @db.Uuid
+  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  name      String
+  address   String?
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  deliveryOptions DeliveryOption[]
+
+  @@index([storeId])
+}
+
+// A physical point where stock physically sits (a shop, a warehouse…).
+// Every store starts with one "Main Branch" (created at onboarding,
+// backfilled by the migration) which is also Store.defaultBranchId.
+// (storeId, name) is unique so the branch list stays typo-free per tenant.
+// Branch deletion is service-gated: the default branch can never be
+// deleted, and a branch holding stock must be emptied (transferred out)
+// first — BranchStock rows cascade away, ledger history is nulled
+// (SetNull), and order history is protected by Restrict.
+model Branch {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  storeId   String   @db.Uuid
+  store     Store    @relation("StoreBranches", fields: [storeId], references: [id], onDelete: Cascade)
+  name      String
+  address   String?
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  defaultFor            Store?                 @relation("StoreDefaultBranch")
+  stockRows             BranchStock[]
+  ledgerEntries         StockLedgerEntry[]
+  orders                Order[]
+  purchaseOrders        PurchaseOrder[]
+  purchaseOrderReceipts PurchaseOrderReceipt[]
+
+  @@unique([storeId, name])
+  @@index([storeId])
+}
+
+// THE branch-scoped stock counter — the authoritative quantity for a
+// product (or variant) in ONE branch. Product.quantity and
+// ProductVariant.quantity remain as cross-branch cached totals; this row
+// is what every movement guards against (see ledger.service).
+// variantId is null for a variant-less product's row; a product WITH
+// variants only ever has per-variant rows (a product-level row would be
+// a model corruption).
+// The invariant "every (branch, product[, variant]) has exactly one row"
+// is enforced two ways: rows are created eagerly at product creation and
+// by the ledger's ensure-on-restock path, AND the migration adds partial
+// unique indexes (variantId-null rows unique per branch+product, named
+// rows per branch+product+variant) so concurrent first-movements cannot
+// double-create. The partial indexes live in the migration because Prisma
+// cannot express WHERE-clause indexes; the schema only declares a plain
+// index for query performance.
+// Cascade on product/variant/branch: stock rows are derived state — they
+// die with their product and with their branch.
+model BranchStock {
+  id        String          @id @default(uuid(7)) @db.Uuid
+  storeId   String          @db.Uuid
+  store     Store           @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  branchId  String          @db.Uuid
+  branch    Branch          @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  productId String          @db.Uuid
+  product   Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variantId String?         @db.Uuid
+  variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  // Per-branch stock. NEVER written directly — every change goes through
+  // the stock-adjustment transaction (ledger.service), which atomically
+  // enforces quantity >= 0 (DB CHECK + conditional UPDATE).
+  quantity  Int             @default(0)
+  createdAt DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime        @updatedAt @db.Timestamptz(3)
+
+  @@index([storeId])
+  @@index([branchId])
+  @@index([productId, variantId])
+}
+
+// APPEND-ONLY: no updatedAt, and a DB trigger rejects UPDATE/DELETE.
+// Restrict on product: audit history must survive product deletion
+// (products will be soft-deleted in a later phase).
+// quantityChange is signed; zero is rejected by a DB CHECK.
+// variantId is null for movements on variant-less products and names the
+// exact variant otherwise — variant-having products NEVER record
+// product-level movements. Restrict on variant: the same append-only
+// discipline applies (variants are not hard-deleted in normal operation).
+model StockLedgerEntry {
+  id                 String          @id @default(uuid(7)) @db.Uuid
+  storeId            String          @db.Uuid
+  store              Store           @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  productId          String          @db.Uuid
+  product            Product         @relation(fields: [productId], references: [id], onDelete: Restrict)
+  variantId          String?         @db.Uuid
+  variant            ProductVariant? @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  // The branch the movement happened in — REQUIRED for every movement
+  // written by the service. Nullable only as a deletion mechanism: when
+  // a branch is deleted its ledger history survives but the attribution
+  // becomes anonymous (SetNull), matching the performedByStaff pattern.
+  branchId           String?         @db.Uuid
+  branch             Branch?         @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  quantityChange     Int
+  reason             StockReason
+  // Free-form pointer to the movement's source document (e.g. a purchase
+  // order id when a RESTOCK arrives from a received PO). Deliberately NO
+  // foreign key: the referenced document can belong to any future module
+  // (POs today, suppliers' deliveries tomorrow) and history must survive
+  // that document's deletion. Null when the movement has no source.
+  referenceId        String?
+  performedByStaffId String?         @db.Uuid
+  performedByStaff   StaffMember?    @relation(fields: [performedByStaffId], references: [id], onDelete: SetNull)
+  createdAt          DateTime        @default(now()) @db.Timestamptz(3)
+
+  @@index([storeId])
+  @@index([branchId])
+  @@index([productId, createdAt])
+  @@index([variantId, createdAt])
+}
+
+// PER-STORE MERCHANT-VISIBLE ACTIVITY LOG — separate from the platform's
+// AdminAuditLog (internal team only, platform-wide). This one records
+// staff/owner actions inside ONE store and is readable by that store's
+// dashboard. APPEND-ONLY: no updatedAt, and a DB trigger rejects
+// UPDATE/DELETE — the same discipline as StockLedgerEntry and
+// AdminAuditLog, so the record cannot be rewritten.
+// SetNull on staff: the log survives the staff member's removal (the
+// action happened; attribution just becomes anonymous history).
+// Cascade on store: the tenant's log dies with the tenant.
+// staffMemberId is null for Owner-performed actions (owners have no
+// StaffMember row).
+model StoreActivityLog {
+  id            String       @id @default(uuid(7)) @db.Uuid
+  storeId       String       @db.Uuid
+  store         Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  staffMemberId String?      @db.Uuid
+  staffMember   StaffMember? @relation(fields: [staffMemberId], references: [id], onDelete: SetNull)
+  // Dotted, namespaced, e.g. "product.created", "stock.adjusted",
+  // "staff.role.updated" — same convention as AdminAuditLog actions.
+  action        String
+  detail        Json
+  createdAt     DateTime     @default(now()) @db.Timestamptz(3)
+
+  @@index([storeId, createdAt])
+  @@index([storeId, staffMemberId])
+  @@index([staffMemberId])
+}
+
+// No Account relation — walk-in/cash customers have no login.
+model Customer {
+  id        String         @id @default(uuid(7)) @db.Uuid
+  storeId   String         @db.Uuid
+  store     Store          @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  name      String
+  phone     String?
+  email     String?
+  // Where the row was first created (POS/checkout/dashboard/import).
+  // Written once at creation, never changed afterwards.
+  source    CustomerSource @default(MANUAL)
+  // The customer's segment (dashboard-customer-groups). Optional: a
+  // customer without a group is "General". SetNull on group deletion —
+  // customers must never be destroyed by deleting a group label.
+  groupId   String?        @db.Uuid
+  group     CustomerGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  createdAt DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime       @updatedAt @db.Timestamptz(3)
+
+  orders            Order[]
+  invoices          Invoice[]
+  couponRedemptions CouponRedemption[]
+
+  @@index([storeId])
+  @@index([groupId])
+}
+
+// Merchant-defined customer segments ("General", "VIP", "Wholesale").
+// Store-scoped with a (storeId, name) unique pair so the address book
+// stays typo-free per tenant. A group may carry an auto-applied discount
+// (SetNull on discount deletion: the group just loses the link). Deleting
+// a group never touches its customers (Customer.groupId is SetNull); the
+// service layer refuses to delete a group with assigned members.
+model CustomerGroup {
+  id          String    @id @default(uuid(7)) @db.Uuid
+  storeId     String    @db.Uuid
+  store       Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  discountId  String?   @db.Uuid
+  discount    Discount? @relation(fields: [discountId], references: [id], onDelete: SetNull)
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime  @updatedAt @db.Timestamptz(3)
+
+  customers Customer[]
+
+  @@unique([storeId, name])
+  @@index([storeId])
+  @@index([discountId])
+}
+
+// Reusable cart-wide discounts (dashboard-discounts). Store-scoped;
+// `code` is unique per store (case-insensitive, normalized uppercase
+// server-side). A discount applies only while isActive AND within its
+// validity window (when set). Cart-wide only — no per-product scope.
+// discountAmount on orders is the captured money fact; deleting a
+// discount unlinks attribution (SetNull) without rewriting history.
+model Discount {
+  id              String       @id @default(uuid(7)) @db.Uuid
+  storeId         String       @db.Uuid
+  store           Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  name            String
+  type            DiscountType
+  value           Decimal      @db.Decimal(10, 2)
+  code            String?      @db.VarChar(40)
+  startsAt        DateTime?    @db.Timestamptz(3)
+  endsAt          DateTime?    @db.Timestamptz(3)
+  isActive        Boolean      @default(true)
+  // Coupon limits (dashboard-discounts.md): a discount with a code that
+  // carries any of these becomes a coupon — enforced at sale time, every
+  // successful use writes a CouponRedemption row. Group auto-discounts
+  // are rules, not codes, and stay exempt from redemption accounting.
+maxUses          Int?     // global redemption cap
+  perCustomerUses  Int?     @default(1) // cap per customer
+  minSubtotal      Decimal? @db.Decimal(10, 2)
+  // No default: NULL means "not a coupon rule" — a false default would
+  // mark every discount as a coupon (hasCouponRules keys off non-null).
+  firstOrderOnly Boolean?
+  createdAt       DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime     @updatedAt @db.Timestamptz(3)
+
+  customerGroups    CustomerGroup[]
+  orders            Order[]
+  campaigns         Campaign[]
+  couponRedemptions CouponRedemption[]
+
+  @@unique([storeId, code])
+  @@index([storeId])
+  @@index([storeId, isActive])
+}
+
+// Time-boxed storefront promotions (dashboard-campaigns.md): a marketing
+// banner the public storefront shows while the campaign is live, with an
+// optional link to a coupon (a Discount with coupon limits) so the banner
+// and the code travel together. Live = isActive AND now inside the
+// validity window (no window means evergreen). SetNull on discount
+// deletion: the banner just loses its code, order money is untouched.
+// Performance stats per campaign arrive with the analytics enrichment
+// phase — this model carries no accounting of its own.
+model Campaign {
+  id             String    @id @default(uuid(7)) @db.Uuid
+  storeId        String    @db.Uuid
+  store          Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  name           String
+  startsAt       DateTime? @db.Timestamptz(3)
+  endsAt         DateTime? @db.Timestamptz(3)
+  bannerTitle    String?
+  bannerSubtitle String?
+  ctaLabel       String?
+  discountId     String?   @db.Uuid
+  discount       Discount? @relation(fields: [discountId], references: [id], onDelete: SetNull)
+  isActive       Boolean   @default(true)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(3)
+
+  @@index([storeId])
+  @@index([storeId, isActive])
+}
+
+// COUPON USAGE RECORDS — one row per successful coupon application,
+// written in the same transaction as its order (dashboard-discounts.md).
+// Deliberately NOT append-only: this is usage accounting, not a financial
+// ledger — it cascades with its order and its discount, and the captured
+// money facts (Order.discountAmount) always survive. orderId is unique so
+// an order can never carry more than one redemption, and the service
+// layer counts rows to enforce maxUses / perCustomerUses.
+model CouponRedemption {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  storeId    String   @db.Uuid
+  store      Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  discountId String   @db.Uuid
+  discount   Discount @relation(fields: [discountId], references: [id], onDelete: Cascade)
+  orderId    String   @unique @db.Uuid
+  order      Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  customerId String   @db.Uuid
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([storeId])
+  @@index([discountId])
+  @@index([customerId])
+}
+
+// Restrict on customer: financial records must survive customer deletion.
+// A DB (deferred) trigger enforces "at least one line item" at commit.
+model Order {
+  id               String         @id @default(uuid(7)) @db.Uuid
+  storeId          String         @db.Uuid
+  store            Store          @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  // Store-sequential human number (ORD-####). Assigned at creation
+  // inside the order's transaction (Store.orderCounter bump), so
+  // numbers are gap-free per store and never reused.
+  orderNumber      String         @db.VarChar(16)
+  customerId       String         @db.Uuid
+  customer         Customer       @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  status           OrderStatus    @default(PENDING)
+  total            Decimal        @db.Decimal(10, 2)
+  // Cart-level discount applied at sale time (POS record-sale). Line
+  // totals are the undiscounted captured prices; this is the one
+  // order-wide reduction. Computed server-side from a managed Discount
+  // (or the customer's group discount); clients never supply it.
+  discountAmount   Decimal        @default(0) @db.Decimal(10, 2)
+  // The managed discount rule used at sale time (dashboard-discounts).
+  // SetNull on discount deletion: discountAmount is the captured money
+  // fact and must survive; discountId is informational attribution.
+  discountId       String?        @db.Uuid
+  discount         Discount?      @relation(fields: [discountId], references: [id], onDelete: SetNull)
+  // POS-sale payment facts (dashboard orders service). Null on
+  // storefront orders: those go through a payment provider (the PENDING
+  // row's payment fields below record the initiation, not proof of
+  // payment). CASH/TRANSFER/CREDIT set amountPaid immediately; a CREDIT
+  // sale with amountPaid < total is an outstanding balance the customer
+  // owes (balance = total - amountPaid; credit repayments consume it in
+  // a later phase). CARD keeps amountPaid null until the webhook pays.
+  paymentMethod    PaymentMethod?
+  amountPaid       Decimal?       @db.Decimal(10, 2)
+  // First successful paid transition. Unlike updatedAt, this remains stable
+  // when fulfillment later changes status (e.g. PAID -> SHIPPED).
+  paidAt           DateTime?      @db.Timestamptz(3)
+  // Where the order came from — POS sales vs storefront checkouts;
+  // powers the revenue-by-channel breakdown later.
+  source           OrderSource    @default(STOREFRONT)
+  // Payment tracking: set at checkout initiation. The Order stays
+  // PENDING until the payment webhook confirms it (Phase 9); payment
+  // fields on a PENDING row are the initiation record, not proof of
+  // payment. paymentReference is generated by the checkout service and
+  // echoed by the provider.
+  paymentProvider  String?
+  paymentReference String?
+  authorizationUrl String?
+  // Set when the customer clicks "I have paid" on a bank-transfer order.
+  paymentSubmittedAt DateTime? @db.Timestamptz(3)
+  // Recipient for the customer receipt email, FROZEN at order creation
+  // (like unitPriceAtPurchase): the storefront buyer's email, or the POS
+  // customer's email / explicit `email` override. Null when no email was
+  // known (e.g. a walk-in POS cash sale) — the receipt is skipped then.
+  // Frozen so a later edit to the customer row can't misdirect a receipt,
+  // and so the POS CARD email override survives to the webhook.
+  receiptEmail      String?    @db.VarChar(320)
+  // Bank details FROZEN at checkout (mirrors unitPriceAtPurchase): the
+  // public endpoint reads these, never the live BankAccount row, so editing
+  // or deleting the merchant's bank account can't misdirect an in-flight
+  // payment. bankAccountId is traceability only.
+  bankAccountId String?     @db.Uuid
+  bankName      String?     @db.VarChar(2048)
+  accountName   String?     @db.VarChar(2048)
+  accountNumber String?     @db.VarChar(64)
+  bankAccount  BankAccount? @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+  // Fulfilment FROZEN at storefront checkout (same discipline as the bank
+  // snapshot): the chosen option name, the fee, and the customer's address
+  // are copied here so editing or deleting a DeliveryOption never rewrites
+  // a placed order. deliveryFee is already included in `total`.
+  deliveryOptionId       String?         @db.Uuid
+  deliveryOption         DeliveryOption? @relation(fields: [deliveryOptionId], references: [id], onDelete: SetNull)
+  deliveryKind           DeliveryKind?
+  deliveryOptionName     String?         @db.VarChar(200)
+  deliveryFee            Decimal         @default(0) @db.Decimal(10, 2)
+  // Customer-supplied delivery details (DELIVERY options only; null for
+  // pickup). address/city/state/phone are required at checkout, instructions
+  // optional. Frozen here so later edits to the customer never rewrite it.
+  deliveryAddress        String?         @db.VarChar(500)
+  deliveryCity           String?         @db.VarChar(120)
+  deliveryState          String?         @db.VarChar(120)
+  deliveryPhone          String?         @db.VarChar(30)
+  deliveryInstructions   String?         @db.VarChar(500)
+  // The branch whose stock this order decrements on payment
+  // confirmation (the store's default branch at initiation). Restrict on
+  // branch: financial history must keep its attribution, so a branch with
+  // any order history cannot be deleted (the service layer surfaces this
+  // as a 409).
+  branchId         String         @db.Uuid
+  branch           Branch         @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  // Staff sales attribution (canonical source for staff analytics). Set by
+  // the sales workflow that completes an order on behalf of a staff member;
+  // null for orders placed entirely by the customer through public checkout.
+  // SetNull on staff deletion: financial history keeps its integrity, and
+  // staff-performance reporting treats the order as unattributed.
+  soldByStaffId    String?        @db.Uuid
+  soldByStaff      StaffMember?   @relation("SoldOrders", fields: [soldByStaffId], references: [id], onDelete: SetNull)
+  createdAt        DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime       @updatedAt @db.Timestamptz(3)
+
+  lineItems        OrderLineItem[]
+  creditRepayments CreditRepayment[]
+  walletEntries    WalletEntry[]
+  couponRedemption CouponRedemption?
+
+  @@unique([storeId, paymentReference])
+  @@unique([storeId, orderNumber])
+  @@index([storeId])
+  @@index([storeId, status])
+  @@index([branchId])
+  @@index([soldByStaffId])
+  // Analytics range reads: successful sales filtered by store + timestamp.
+  @@index([storeId, createdAt, status])
+  @@index([storeId, paidAt])
+  @@index([bankAccountId])
+}
+
+// APPEND-ONLY credit-repayment records: money applied against a CREDIT
+// order's outstanding balance (see Order.amountPaid). The same discipline
+// as StockLedgerEntry — a DB trigger rejects UPDATE/DELETE, and amount is
+// strictly positive (DB CHECK). amountPaid on the order advances with
+// these rows; the ledger is the authoritative "who repaid what, when"
+// record, the store activity log is the human-readable layer.
+// Cascade on order: a repayment dies with its order. SetNull on staff:
+// the financial record survives staff deletion without attribution.
+model CreditRepayment {
+  id                String       @id @default(uuid(7)) @db.Uuid
+  storeId           String       @db.Uuid
+  store             Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  orderId           String       @db.Uuid
+  order             Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  amount            Decimal      @db.Decimal(10, 2)
+  note              String?
+  recordedByStaffId String?      @db.Uuid
+  recordedByStaff   StaffMember? @relation(fields: [recordedByStaffId], references: [id], onDelete: SetNull)
+  createdAt         DateTime     @default(now()) @db.Timestamptz(3)
+
+  @@index([storeId])
+  @@index([orderId])
+  @@index([storeId, createdAt])
+}
+
+// storeId is denormalized from Order on purpose: the tenant auto-inject
+// wrapper (RULES.md) needs store_id on every tenant-scoped table, and it
+// keeps line-item queries tenant-filterable without a join.
+// Restrict on product: prices are captured, but the product reference
+// must stay valid while financial history exists.
+model OrderLineItem {
+  id                  String          @id @default(uuid(7)) @db.Uuid
+  storeId             String          @db.Uuid
+  store               Store           @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  orderId             String          @db.Uuid
+  order               Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId           String          @db.Uuid
+  product             Product         @relation(fields: [productId], references: [id], onDelete: Restrict)
+  // Null for variant-less products; names the exact variant otherwise.
+  // Restrict: captured-purchase integrity (line items must stay valid
+  // while financial history exists).
+  variantId           String?         @db.Uuid
+  variant             ProductVariant? @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  quantity            Int
+  // Captured at purchase time — never looked up from Product afterward.
+  unitPriceAtPurchase Decimal         @db.Decimal(10, 2)
+  createdAt           DateTime        @default(now()) @db.Timestamptz(3)
+
+  @@index([storeId])
+  @@index([orderId])
+  @@index([variantId])
+}
+
+// Separate from Order: invoices track money owed independent of
+// fulfillment status. Same price-captured-at-issue pattern. Lifecycle
+// DRAFT -> ISSUED -> PAID (or VOID): drafts are editable and deletable;
+// issuing stamps issuedAt and assigns the store-sequential INV-####
+// number; PAYMENTS land through the append-only InvoicePayment ledger
+// (below) and PAID is reached automatically when amountPaid = total.
+// Payments on the books block VOID.
+model Invoice {
+  id         String        @id @default(uuid(7)) @db.Uuid
+  storeId    String        @db.Uuid
+  store      Store         @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  customerId String        @db.Uuid
+  customer   Customer      @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  status     InvoiceStatus @default(DRAFT)
+  // Human number (INV-####, per-store sequence). Null while DRAFT;
+  // assigned once at issue and never reused.
+  number     String?
+  total      Decimal       @db.Decimal(10, 2)
+  // Advances with InvoicePayment rows; the driver of the PAID status,
+  // never set by hand.
+  amountPaid Decimal       @default(0) @db.Decimal(10, 2)
+  // Informational only (no enforcement in the invoices phase).
+  dueDate    DateTime?     @db.Timestamptz(3)
+  issuedAt   DateTime?     @db.Timestamptz(3)
+  // Whether the public share link is live. Defaults to true at issue
+  // (all existing invoices keep working). The merchant can toggle it
+  // off to kill a shared link without voiding the invoice — a disabled
+  // link behaves exactly like an unknown/draft id (404), so disabling
+  // leaks nothing.
+  linkEnabled Boolean      @default(true)
+  createdAt  DateTime      @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime      @updatedAt @db.Timestamptz(3)
+
+  lineItems InvoiceLineItem[]
+  payments  InvoicePayment[]
+
+  @@index([storeId])
+  @@index([storeId, customerId])
+  @@index([storeId, status])
+}
+
+// Append-only payment ledger for invoices (DB-enforced like
+// CreditRepayment and the stock ledger): rows can only be inserted.
+// Partial payments are fine — Invoice.amountPaid advances per row.
+model InvoicePayment {
+  id                String       @id @default(uuid(7)) @db.Uuid
+  storeId           String       @db.Uuid
+  store             Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  invoiceId         String       @db.Uuid
+  invoice           Invoice      @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  amount            Decimal      @db.Decimal(10, 2)
+  note              String?
+  recordedByStaffId String?      @db.Uuid
+  recordedByStaff   StaffMember? @relation(fields: [recordedByStaffId], references: [id], onDelete: SetNull)
+  createdAt         DateTime     @default(now()) @db.Timestamptz(3)
+
+  @@index([storeId])
+  @@index([invoiceId])
+  @@index([storeId, createdAt])
+}
+
+model InvoiceLineItem {
+  id               String   @id @default(uuid(7)) @db.Uuid
+  storeId          String   @db.Uuid
+  store            Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  invoiceId        String   @db.Uuid
+  invoice          Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  productId        String   @db.Uuid
+  product          Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  quantity         Int
+  unitPriceAtIssue Decimal  @db.Decimal(10, 2)
+  createdAt        DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([storeId])
+  @@index([invoiceId])
+}
+
+// One row per merchant-alert email actually dispatched to the store
+// owner. The (storeId, kind, refType, refId) uniqueness IS the dedup
+// gate: the same condition is never emailed twice. LOW_STOCK rows carry
+// sentQuantity so the sweep can re-alert only when stock has WORSENED
+// since the last send (a store that re-stocked must not be re-bombarded
+// for a condition it already saw). `snapshot` is the human-readable
+// condition rendered in the email (names, quantities, amounts) — alert
+// history survives product renames and branch deletions.
+model NotificationDispatch {
+  id           String           @id @default(uuid(7)) @db.Uuid
+  storeId      String           @db.Uuid
+  store        Store            @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  kind         NotificationKind
+  // What the alert is about: BRANCH_STOCK / PRODUCT / ORDER /
+  // CREDIT_REPAYMENT / INVOICE_PAYMENT. refId is that row's uuid.
+  refType      String
+  refId        String           @db.Uuid
+  // Quantity at send time for LOW_STOCK alerts (the worsening rule);
+  // null for every other kind.
+  sentQuantity Int?
+  snapshot     Json
+  sentAt       DateTime         @default(now()) @db.Timestamptz(3)
+
+  @@unique([storeId, kind, refType, refId])
+  @@index([storeId, kind, sentAt])
+}
+
+// === Purchasing (suppliers + purchase orders) ===========================
+model SupportTicket {
+  id String @id @default(uuid(7)) @db.Uuid
+  storeId String @db.Uuid
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  subject String
+  priority TicketPriority @default(MEDIUM)
+  status TicketStatus @default(OPEN)
+  raisedByAccountId String? @db.Uuid
+  raisedByAccount Account? @relation("TicketRaisedBy", fields: [raisedByAccountId], references: [id], onDelete: SetNull)
+  assignedAdminId String? @db.Uuid
+  assignedAdmin AdminUser? @relation("TicketAssignedAdmin", fields: [assignedAdminId], references: [id], onDelete: SetNull)
+  resolvedAt DateTime? @db.Timestamptz(3)
+  closedAt DateTime? @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+  messages TicketMessage[]
+  @@index([storeId, status, createdAt])
+  @@index([assignedAdminId, status, createdAt])
+}
+
+model TicketMessage {
+  id String @id @default(uuid(7)) @db.Uuid
+  ticketId String @db.Uuid
+  ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  authorType TicketAuthorType
+  authorAccountId String? @db.Uuid
+  authorAccount Account? @relation("TicketMessageAccountAuthor", fields: [authorAccountId], references: [id], onDelete: SetNull)
+  authorAdminId String? @db.Uuid
+  authorAdmin AdminUser? @relation("TicketMessageAdminAuthor", fields: [authorAdminId], references: [id], onDelete: SetNull)
+  body String
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  @@index([ticketId, createdAt, id])
+}
+
+model Announcement {
+  id String @id @default(uuid(7)) @db.Uuid
+  title String
+  body String
+  targetTier SubscriptionTier?
+  publishedAt DateTime? @db.Timestamptz(3)
+  isActive Boolean @default(true)
+  createdByAdminId String @db.Uuid
+  createdByAdmin AdminUser @relation(fields: [createdByAdminId], references: [id], onDelete: Restrict)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+  views AnnouncementView[]
+  @@index([publishedAt, isActive, targetTier])
+  @@index([createdAt])
+}
+
+model AnnouncementView {
+  id String @id @default(uuid(7)) @db.Uuid
+  announcementId String @db.Uuid
+  announcement Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  storeId String @db.Uuid
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  viewedAt DateTime @default(now()) @db.Timestamptz(3)
+  @@unique([announcementId, storeId])
+  @@index([announcementId])
+}
+
+// The vendor directory and the goods-receiving flow. Receiving is the
+// only way stock enters a PO: every receipt writes RESTOCK stock-ledger
+// movements (referenceId = the order id) plus an append-only
+// PurchaseOrderReceipt row, in one transaction.
+// =========================================================================
+
+// A merchant's vendor. (storeId, name) unique per tenant — the same
+// typo-free rule as Category/Unit. Restrict on purchase order: order
+// history keeps its supplier attribution, so a supplier with orders can
+// never be deleted (the service classifies it 409; isActive: false is
+// the supported way to retire one).
+model Supplier {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  storeId     String   @db.Uuid
+  store       Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  name        String
+  contactName String?
+  phone       String?
+  email       String?
+  address     String?
+  // Soft toggle — deactivating keeps order history intact.
+  isActive    Boolean  @default(true)
+  notes       String?
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  purchaseOrders PurchaseOrder[]
+
+  @@unique([storeId, name])
+  @@index([storeId])
+}
+
+// The purchasing document. Money owed independent of fulfillment — like
+// Invoice, but against a supplier instead of a customer, and stock
+// moves when goods are received (not at issue). Restrict on
+// supplier/branch: financial and stock documents keep their
+// attribution. Restrict on the ledger-less product references is
+// handled by the line items and receipt lines below.
+// Cascade on store: the tenant's purchasing history dies with the
+// tenant. SetNull on staff: attribution survives staff removal.
+model PurchaseOrder {
+  id                   String              @id @default(uuid(7)) @db.Uuid
+  storeId              String              @db.Uuid
+  store                Store               @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  supplierId           String              @db.Uuid
+  supplier             Supplier            @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  status               PurchaseOrderStatus @default(DRAFT)
+  // Human number (PO-####, per-store sequence). Null while DRAFT;
+  // assigned once at issue and never reused.
+  number               String?
+  // The branch the goods land in — every receipt movement targets it.
+  branchId             String              @db.Uuid
+  branch               Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  // Sum of quantity x unitCostAtOrder, captured at create time.
+  total                Decimal             @db.Decimal(10, 2)
+  // Advances with PurchaseOrderPayment rows; never set by hand.
+  amountPaid           Decimal             @default(0) @db.Decimal(10, 2)
+  // Informational only (no enforcement in this phase).
+  expectedDeliveryDate DateTime?           @db.Timestamptz(3)
+  notes                String?
+  orderedAt            DateTime?           @db.Timestamptz(3)
+  // Stamped when the last outstanding quantity lands.
+  receivedAt           DateTime?           @db.Timestamptz(3)
+  cancelledAt          DateTime?           @db.Timestamptz(3)
+  createdByStaffId     String?             @db.Uuid
+  createdByStaff       StaffMember?        @relation(fields: [createdByStaffId], references: [id], onDelete: SetNull)
+  createdAt            DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt            DateTime            @updatedAt @db.Timestamptz(3)
+
+  lineItems                 PurchaseOrderLineItem[]
+  receipts                  PurchaseOrderReceipt[]
+  payments                  PurchaseOrderPayment[]
+  purchaseOrderReceiptLines PurchaseOrderReceiptLine[]
+
+  @@index([storeId])
+  @@index([storeId, supplierId])
+  @@index([storeId, status])
+  @@index([storeId, createdAt])
+}
+
+// Captured at order time — never re-read from the product afterwards.
+// variantId is null for a variant-less product's line; a product WITH
+// variants must be ordered per variant (the service rejects product-
+// level lines, mirroring the stock-ledger rule). quantityReceived
+// advances inside the receipt transaction and drives the order status.
+// Restrict on product/variant: captured-cost integrity.
+model PurchaseOrderLineItem {
+  id               String          @id @default(uuid(7)) @db.Uuid
+  storeId          String          @db.Uuid
+  store            Store           @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  purchaseOrderId  String          @db.Uuid
+  purchaseOrder    PurchaseOrder   @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  productId        String          @db.Uuid
+  product          Product         @relation(fields: [productId], references: [id], onDelete: Restrict)
+  variantId        String?         @db.Uuid
+  variant          ProductVariant? @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  quantity         Int
+  unitCostAtOrder  Decimal         @db.Decimal(10, 2)
+  quantityReceived Int             @default(0)
+  createdAt        DateTime        @default(now()) @db.Timestamptz(3)
+
+  @@index([storeId])
+  @@index([purchaseOrderId])
+}
+
+// APPEND-ONLY receiving ledger: no updatedAt, and a DB trigger rejects
+// UPDATE/DELETE — the same discipline as InvoicePayment and
+// CreditRepayment. One header per receiving event (a partial delivery
+// is its own row); the lines below carry what arrived. Cascade on
+// order: receipts are part of the order's history. SetNull on branch:
+// the ledger survives branch deletion without attribution (the same
+// anonymous-history pattern as StockLedgerEntry.branchId).
+model PurchaseOrderReceipt {
+  id                String        @id @default(uuid(7)) @db.Uuid
+  storeId           String        @db.Uuid
+  store             Store         @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  purchaseOrderId   String        @db.Uuid
+  purchaseOrder     PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  branchId          String        @db.Uuid
+  branch            Branch        @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  note              String?
+  recordedByStaffId String?       @db.Uuid
+  recordedByStaff   StaffMember?  @relation(fields: [recordedByStaffId], references: [id], onDelete: SetNull)
+  createdAt         DateTime      @default(now()) @db.Timestamptz(3)
+
+  lines PurchaseOrderReceiptLine[]
+
+  @@index([storeId])
+  @@index([purchaseOrderId])
+  @@index([storeId, createdAt])
+}
+
+// One arrived quantity inside a receipt. Restrict on product/variant:
+// the stock movement these rows drove must keep its product reference
+// valid (the same discipline as StockLedgerEntry). unitCostAtReceipt is
+// copied from the order line's unitCostAtOrder (cost drift is out of
+// scope for this phase).
+model PurchaseOrderReceiptLine {
+  id                String               @id @default(uuid(7)) @db.Uuid
+  storeId           String               @db.Uuid
+  store             Store                @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  receiptId         String               @db.Uuid
+  receipt           PurchaseOrderReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  purchaseOrderId   String               @db.Uuid
+  purchaseOrder     PurchaseOrder        @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  productId         String               @db.Uuid
+  product           Product              @relation(fields: [productId], references: [id], onDelete: Restrict)
+  variantId         String?              @db.Uuid
+  variant           ProductVariant?      @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  quantityReceived  Int
+  unitCostAtReceipt Decimal              @db.Decimal(10, 2)
+  createdAt         DateTime             @default(now()) @db.Timestamptz(3)
+
+  @@index([storeId])
+  @@index([receiptId])
+  @@index([purchaseOrderId])
+}
+
+// APPEND-ONLY payment ledger for purchase orders — the same discipline
+// as InvoicePayment: rows can only be inserted, amounts are strictly
+// positive, and PurchaseOrder.amountPaid advances per row.
+model PurchaseOrderPayment {
+  id                String        @id @default(uuid(7)) @db.Uuid
+  storeId           String        @db.Uuid
+  store             Store         @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  purchaseOrderId   String        @db.Uuid
+  purchaseOrder     PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  amount            Decimal       @db.Decimal(10, 2)
+  note              String?
+  recordedByStaffId String?       @db.Uuid
+  recordedByStaff   StaffMember?  @relation(fields: [recordedByStaffId], references: [id], onDelete: SetNull)
+  createdAt         DateTime      @default(now()) @db.Timestamptz(3)
+
+  @@index([storeId])
+  @@index([purchaseOrderId])
+  @@index([storeId, createdAt])
+}
+
+// === Wallet (merchant payouts) ============================================
+// The store's money ledger: CREDITs from paid online orders, DEBITs from
+// withdrawals. StoreWallet is the current-balance authority (row locks
+// serialize concurrent debits); WalletEntry is the append-only audit
+// trail. All amounts are NGN Decimal(10,2).
+
+// The wallet's current balance. Cascade on store: the wallet dies with
+// its tenant. balance is only ever moved through conditional
+// increments/decrements (withdrawal debits check gte atomically), so
+// concurrent withdrawals can never overdraw.
+model StoreWallet {
+  storeId   String   @id @db.Uuid
+  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  balance   Decimal  @default(0) @db.Decimal(10, 2)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+}
+
+// APPEND-ONLY wallet ledger: every movement with its post-movement
+// balance — the same discipline as StockLedgerEntry (a DB trigger
+// rejects UPDATE/DELETE; amount is strictly positive via DB CHECK).
+// balanceAfter is the balance exactly after this entry; the StoreWallet
+// row is the live-balance authority. SetNull on order/payout: ledger
+// history survives the source document being deleted.
+model WalletEntry {
+  id           String            @id @default(uuid(7)) @db.Uuid
+  storeId      String            @db.Uuid
+  store        Store             @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  type         WalletEntryType
+  source       WalletEntrySource
+  amount       Decimal           @db.Decimal(10, 2)
+  balanceAfter Decimal           @db.Decimal(10, 2)
+  orderId      String?           @db.Uuid
+  order        Order?            @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  payoutId     String?           @db.Uuid
+  payout       Payout?           @relation(fields: [payoutId], references: [id], onDelete: SetNull)
+  createdAt    DateTime          @default(now()) @db.Timestamptz(3)
+
+  @@index([storeId])
+  @@index([storeId, createdAt])
+  @@index([orderId])
+  @@index([payoutId])
+}
+
+// The merchant's withdrawal destination. Paystack holds the real account
+// via recipientCode (created at store time); we keep only a masked
+// number — the full account number never touches our database. Cascade
+// on store: the record dies with its tenant.
+model BankAccount {
+  id                  String   @id @default(uuid(7)) @db.Uuid
+  storeId             String   @db.Uuid
+  store               Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  accountName         String
+  bankName            String
+  // Full account number, entered by the merchant for direct bank-transfer
+  // payments (no provider involved). Null only for legacy Paystack-payout
+  // accounts created before this field existed.
+  accountNumber       String?  @db.VarChar(64)
+  // Paystack-only fields (payouts). Optional so merchant-managed transfer
+  // accounts — which need none of these — can be stored without them.
+  bankCode            String?
+  maskedAccountNumber String?
+  recipientCode       String?
+  isDefault           Boolean  @default(false)
+  createdAt           DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime @updatedAt @db.Timestamptz(3)
+
+  payouts Payout[]
+  orders  Order[]
+
+  @@unique([storeId, recipientCode])
+  @@index([storeId])
+}
+
+// What a customer selects as their fulfilment method at storefront checkout.
+enum DeliveryKind {
+  PICKUP
+  DELIVERY
+}
+
+// A merchant-configured fulfilment choice ("Pick up at store", "Delivery
+// Rider — ₦2,000"). The buyer's fee is this option's `baseFee` — never a
+// client-supplied amount. Pickup options may reuse a store Location
+// (name + address) and/or carry free text. Deleting an option is safe: each
+// order freezes the option name, the fee, and the delivery address, so
+// history never depends on this row. (No zones/distance pricing in Phase 1;
+// the shape leaves room for a richer pricing model later.)
+model DeliveryOption {
+  id          String       @id @default(uuid(7)) @db.Uuid
+  storeId     String       @db.Uuid
+  store       Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  name        String       @db.VarChar(200)
+  kind        DeliveryKind
+  description String?      @db.VarChar(500)
+  // The flat fee charged when this option is chosen.
+  baseFee     Decimal      @default(0) @db.Decimal(10, 2)
+  // false hides it from the storefront checkout.
+  isActive    Boolean      @default(true)
+  sortOrder   Int          @default(0)
+  // PICKUP only: a reused store Location and/or a free-text address.
+  pickupLocationId   String?   @db.Uuid
+  pickupLocation     Location? @relation(fields: [pickupLocationId], references: [id], onDelete: SetNull)
+  pickupAddressText  String?   @db.VarChar(500)
+  createdAt   DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime     @updatedAt @db.Timestamptz(3)
+
+  orders Order[]
+
+  @@unique([storeId, name])
+  @@index([storeId])
+  @@index([storeId, isActive, sortOrder])
+  @@index([pickupLocationId])
+}
+
+// A withdrawal request against the wallet. Restrict on bank account:
+// financial history must keep its attribution, so an account with any
+// payout cannot be deleted (the service layer surfaces 409).
+model Payout {
+  id            String       @id @default(uuid(7)) @db.Uuid
+  storeId       String       @db.Uuid
+  store         Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  bankAccountId String       @db.Uuid
+  bankAccount   BankAccount  @relation(fields: [bankAccountId], references: [id], onDelete: Restrict)
+  // Backend-generated withdrawal reference (wd_…), echoed to Paystack.
+  reference     String       @unique
+  // Paystack's own transfer code, set once the provider accepts it.
+  transferCode  String?      @unique
+  amount        Decimal      @db.Decimal(10, 2)
+  fee           Decimal?     @db.Decimal(10, 2)
+  status        PayoutStatus @default(REQUESTED)
+  processedAt   DateTime?    @db.Timestamptz(3)
+  createdAt     DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime     @updatedAt @db.Timestamptz(3)
+
+  entries WalletEntry[]
+
+  @@index([storeId])
+  @@index([storeId, status])
+  @@index([bankAccountId])
+}
+
+// An operating expense the merchant records against profit. Unlike the
+// append-only ledgers, expenses are plain editable rows: the P&L report
+// is a live sum over them, so edits and deletes land on the next read.
+// `date` is the calendar day the expense belongs to (UTC date string in
+// the API) and is the field the report buckets by — never createdAt.
+model Expense {
+  id          String          @id @default(uuid(7)) @db.Uuid
+  storeId     String          @db.Uuid
+  store       Store           @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  category    ExpenseCategory
+  amount      Decimal         @db.Decimal(10, 2)
+  description String?
+  date        DateTime        @db.Date
+  createdAt   DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime        @updatedAt @db.Timestamptz(3)
+
+  @@index([storeId])
+  @@index([storeId, date])
+  @@index([storeId, category])
+}
+
+// Billing history lives here (multiple rows per store over time);
+// Store.subscriptionId points at the active one. Caps are nullable:
+// null = unlimited.
+model Subscription {
+  id                 String             @id @default(uuid(7)) @db.Uuid
+  storeId            String             @db.Uuid
+  store              Store              @relation("SubscriptionHistory", fields: [storeId], references: [id], onDelete: Cascade)
+  tier               SubscriptionTier
+  status             SubscriptionStatus
+  currentPeriodEnd   DateTime           @db.Timestamptz(3)
+  // Billing-period start, so the window for the rolling orderCap is exact
+  // (createdAt >= currentPeriodStart). Null falls back to the last 30 days
+  // at read time so pre-existing rows remain valid until re-provisioned.
+  currentPeriodStart DateTime?          @db.Timestamptz(3)
+  staffCap           Int?
+  locationCap        Int?
+  productCap         Int?
+  orderCap           Int?
+  // Visible storefront templates. Null = the tier default (ENTERPRISE's
+  // null means all). Unlike the resource caps, a store with NO
+  // subscription does not become unlimited — the templates service
+  // treats the pre-subscription state as the STARTER set (see
+  // dashboard-store-templates.md).
+  templateCap        Int?
+  // A downgrade the merchant scheduled: the store KEEPS its current
+  // (higher) tier and features until currentPeriodEnd, then the sweep
+  // applies this tier (caps down, Paystack plan switched). Null = none.
+  pendingDowngradeTier SubscriptionTier?
+  // Set when a renewal charge fails. PAST_DUE stays USABLE for the grace
+  // window (SUBSCRIPTION_GRACE_PERIOD_MS) before enforcement kicks in;
+  // the sweep clears/flips this once grace elapses.
+  pastDueAt            DateTime?       @db.Timestamptz(3)
+  // Paystack recurring-subscription linkage (platform account, NOT the
+  // merchant's storefront keys). The code + email token are required to
+  // disable/replace the subscription; captured from subscription.create
+  // or the post-upgrade create call.
+  paystackSubscriptionCode String?
+  // Snapshot of the Paystack plan currently billed. Kept in lockstep with
+  // `tier` so a renewal event can be matched back to the right plan.
+  paystackPlanCode         String?
+  paystackEmailToken       String?
+  // The PREVIOUS subscription code/plan during an upgrade swap. Kept until
+  // the old subscription's disable is confirmed; a renewal event matching
+  // this pair after the switch is a double-charge (Guard 1) and is
+  // recorded as an orphan payment with no local effect.
+  legacyPaystackSubscriptionCode String?
+  legacyPaystackPlanCode         String?
+  // True while an upgrade swap could not confirm the old subscription's
+  // disable (wrapped in the same guarded update as the swap). The sweep
+  // retries the disable until it succeeds.
+  swapPending              Boolean       @default(false)
+  // Paid renewal cycles since activation (analytics).
+  renewalCount             Int           @default(0)
+  createdAt          DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime           @updatedAt @db.Timestamptz(3)
+
+  activeStore Store? @relation("ActiveSubscription")
+
+  @@index([storeId])
+}
+
+// Append-only record of every subscription money movement (initial
+// subscribe, prorated upgrade, and each recurring renewal). This is the
+// billing history the single active Subscription row mutates in place
+// over — never edited after a terminal PAID/FAILED status. `orphanReason`
+// is set when a payment is caught as a same-cycle double charge (an
+// old-plan renewal arriving after an upgrade swap) and deliberately has
+// no local effect.
+model SubscriptionPayment {
+  id              String                    @id @default(uuid(7)) @db.Uuid
+  storeId         String                    @db.Uuid
+  store           Store                     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  tier            SubscriptionTier
+  kind            SubscriptionPaymentKind
+  status          SubscriptionPaymentStatus @default(PENDING)
+  // Caller-generated reference ("sub_"/"upg_"/"rnl_") echoed by Paystack;
+  // also the correlation key for charge.success resolution.
+  reference       String                    @unique
+  amount          Decimal                   @db.Decimal(10, 2)
+  // Paystack's own transaction reference when it differs from `reference`.
+  providerRef     String?
+  paidAt          DateTime?                 @db.Timestamptz(3)
+  externalEventId String?
+  // Non-null when this payment was detected as a double charge; carries a
+  // human-readable reason. Such a payment has NO local effects.
+  orphanReason    String?
+  createdAt       DateTime                  @default(now()) @db.Timestamptz(3)
+
+  @@index([storeId, createdAt])
+  @@index([storeId, status])
+}
+
+enum SubscriptionPaymentKind {
+  SUBSCRIPTION
+  UPGRADE
+  RENEWAL
+}
+
+enum SubscriptionPaymentStatus {
+  PENDING
+  PAID
+  FAILED
+}
+
+// provider is a String, NOT an enum: new providers (STRIPE, FLUTTERWAVE…)
+// must be addable without a migration. The allowlist is enforced by zod
+// in the webhooks service layer. The (provider, externalEventId) pair is
+// globally unique — webhook replays are idempotent.
+model WebhookEvent {
+  id              String        @id @default(uuid(7)) @db.Uuid
+  storeId         String        @db.Uuid
+  store           Store         @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  provider        String
+  externalEventId String
+  payload         Json
+  processedAt     DateTime?     @db.Timestamptz(3)
+  status          WebhookStatus @default(PENDING)
+  createdAt       DateTime      @default(now()) @db.Timestamptz(3)
+
+  @@unique([provider, externalEventId])
+  @@index([storeId])
+}
+
+// === Admin (platform staff) ==============================================
+// Completely separate from Account/Store: platform staff are not tenants,
+// never resolveTenant-scoped, and authenticate with their own JWT
+// (lib/adminTokens) plus a TOTP 2FA code on EVERY login.
+// =========================================================================
+
+// Platform staff roles. Names are seeded (SUPER_ADMIN, SUPPORT_ADMIN) but
+// the table is data — a new role needs no migration, just a row + joins.
+model Role {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  name      String   @unique
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  admins      AdminUser[]
+  permissions RolePermission[]
+}
+
+// A permission KEY is the unit of authorization (e.g. "stores:view").
+// New keys are pure data: insert a row, bind it via RolePermission, and
+// requireAdminPermission(key) starts enforcing it — zero schema changes.
+model Permission {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  key       String   @unique
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  rolePermissions RolePermission[]
+}
+
+model RolePermission {
+  id           String     @id @default(uuid(7)) @db.Uuid
+  roleId       String     @db.Uuid
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permissionId String     @db.Uuid
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  createdAt    DateTime   @default(now()) @db.Timestamptz(3)
+
+  @@unique([roleId, permissionId])
+  @@index([permissionId])
+}
+
+// Platform staff identity. NOT tenant-scoped — no store_id. One role per
+// admin (roleId); the two-founder reality needs a single role, and
+// RolePermission keeps the additive-permission model fully data-driven.
+// Restrict on role: a role with admins cannot be deleted.
+model AdminUser {
+  id              String   @id @default(uuid(7)) @db.Uuid
+  email           String   @unique
+  passwordHash    String
+  // Base32 TOTP secret (RFC 6238, otplib). Every login requires the
+  // current 6-digit code — no admin session without verified 2FA.
+  twoFactorSecret String
+  isActive        Boolean  @default(true)
+  roleId          String   @db.Uuid
+  role            Role     @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  createdAt       DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @db.Timestamptz(3)
+
+  auditLogs      AdminAuditLog[]
+  pricingUpdates SubscriptionPlanSetting[]
+  refreshTokens  AdminRefreshToken[]
+  assignedSupportTickets SupportTicket[] @relation("TicketAssignedAdmin")
+  ticketMessages TicketMessage[] @relation("TicketMessageAdminAuthor")
+  announcements Announcement[]
+
+  @@index([roleId])
+}
+
+// Stored admin refresh tokens (rotating, opaque). Independent of the merchant
+// RefreshToken model: admins keep their own session table, revoked on 2FA
+// rotate/reset so a leaked secret can't outlive the credential change.
+// Mirrors the merchant RefreshToken shape: family rotates, reuse = theft.
+model AdminRefreshToken {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  adminId     String   @db.Uuid
+  admin       AdminUser @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  // Opaque token id (rt_<random>); the secret half is never persisted.
+  tokenId     String   @unique
+  family      String
+  ipAddress   String?
+  userAgent   String?
+  expiresAt   DateTime @db.Timestamptz(3)
+  revokedAt   DateTime? @db.Timestamptz(3)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([adminId])
+}
+
+// APPEND-ONLY: no updatedAt, and a DB trigger rejects UPDATE/DELETE — the
+// same discipline as StockLedgerEntry, so the audit trail cannot be
+// rewritten. Restrict on admin: audit history must survive its performer.
+// storeId is nullable (platform-level actions concern no single tenant);
+// SetNull keeps the log when the store is deleted.
+model AdminAuditLog {
+  id          String    @id @default(uuid(7)) @db.Uuid
+  adminUserId String    @db.Uuid
+  adminUser   AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Restrict)
+  action      String
+  storeId     String?   @db.Uuid
+  store       Store?    @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  detail      Json
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@index([adminUserId])
+  @@index([storeId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+// Admin-mutable monthly pricing — the single source of truth for MRR.
+// Primary key is the tier; a null monthlyPrice means free/excluded
+// (STARTER). Prices are never compiled into code: the admin dashboard
+// changes them here at runtime, and MRR reads this table.
+model SubscriptionPlanSetting {
+  plan         SubscriptionTier @id
+  monthlyPrice Decimal?         @db.Decimal(10, 2)
+  // The Paystack plan (PLN_...) the platform created for this tier.
+  // Admin creates it (POST /plan) and stores the code here; checkout
+  // refuses to bill a tier without one (409 PRICING_NOT_CONFIGURED).
+  paystackPlanCode String?
+  updatedById  String?          @db.Uuid
+  updatedBy    AdminUser?       @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+  updatedAt    DateTime         @updatedAt @db.Timestamptz(3)
+
+  @@index([updatedById])
+}
+
+// A bulk product import ticket (two-phase: preview -> confirm). The
+// preview (import) phase writes ONLY this row and its ProductImportRows;
+// nothing touches products until the merchant confirms. Expiry is
+// enforced lazily against expiresAt (no cleanup job) — an expired ticket
+// is rejected exactly like an unknown one (404 IMPORT_NOT_FOUND).
+// Cascade on store: the tenant's tickets die with the tenant. SetNull on
+// staff: attribution survives the staff member's removal (audit posture).
+// confirmedAt is set (and status becomes CONFIRMED) by the confirm
+// transaction; a confirmed ticket can never be confirmed again.
+model ProductImport {
+  id               String              @id @default(uuid(7)) @db.Uuid
+  storeId          String              @db.Uuid
+  store            Store               @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  createdByStaffId String?             @db.Uuid
+  createdByStaff   StaffMember?        @relation(fields: [createdByStaffId], references: [id], onDelete: SetNull)
+  status           ProductImportStatus @default(PENDING)
+  createdAt        DateTime            @default(now()) @db.Timestamptz(3)
+  expiresAt        DateTime            @db.Timestamptz(3)
+  confirmedAt      DateTime?           @db.Timestamptz(3)
+
+  rows ProductImportRow[]
+
+  @@index([storeId, createdAt])
+}
+
+// One submitted row of an import ticket, with its preview disposition.
+// The row snapshot (name/price/...) is the CONFIRM-time source of truth —
+// the merchant resolves a preview that must stay stable even if the
+// product is edited in between (the create/overwrite uses these fields,
+// re-validated against the DB only where it matters: catalog ownership
+// and duplicate collisions). existingProductId is set for duplicates of
+// an existing product; createdProductId is set by the confirm transaction
+// when the row actually creates a product.
+model ProductImportRow {
+  id                String                 @id @default(uuid(7)) @db.Uuid
+  importId          String                 @db.Uuid
+  import            ProductImport          @relation(fields: [importId], references: [id], onDelete: Cascade)
+  rowNumber         Int
+  // Nullable: ERROR rows can lack a usable name/price — the errors array
+  // is their record; NEW/DUPLICATE rows always carry validated values.
+  name              String?
+  price             Decimal?               @db.Decimal(10, 2)
+  costPrice         Decimal?               @db.Decimal(10, 2)
+  description       String?
+  images            String[]               @default([])
+  coverImageUrl     String?                @db.VarChar(2048)
+  categoryId        String?                @db.Uuid
+  unitId            String?                @db.Uuid
+  initialStock      Int?
+  status            ProductImportRowStatus @default(NEW)
+  errors            String[]               @default([])
+  existingProductId String?                @db.Uuid
+  createdProductId  String?                @db.Uuid
+  overwrite         Boolean                @default(false)
+
+  @@unique([importId, rowNumber])
+  @@index([importId])
+}

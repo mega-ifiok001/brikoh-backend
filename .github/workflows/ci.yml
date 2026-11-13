@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "feat/**"]
+  pull_request:
+
+jobs:
+  backend:
+    name: Backend — lint, typecheck, test, build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oja-backend
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/brikoh_test
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/brikoh_test
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+      JWT_REFRESH_SECRET: ${{ secrets.JWT_REFRESH_SECRET }}
+      JWT_ACCESS_EXPIRES_IN: 15m
+      JWT_REFRESH_EXPIRES_IN: 7d
+      # Platform-staff (admin) JWT — a SEPARATE secret from JWT_SECRET.
+      # Secret is set in GitHub repo settings (32 chars, passes min 16).
+      ADMIN_JWT_SECRET: ${{ secrets.ADMIN_JWT_SECRET }}
+      ADMIN_JWT_ACCESS_EXPIRES_IN: 15m
+      # Dummies are enough: Cloudinary signing is a pure local computation
+      # and the test suite never touches the Cloudinary network endpoint.
+      # Real values go in GitHub secrets once an e2e suite needs actual
+      # uploads.
+      CLOUDINARY_CLOUD_NAME: test-cloud
+      CLOUDINARY_API_KEY: test-api-key
+      CLOUDINARY_API_SECRET: test-secret-key
+      CLOUDINARY_FOLDER_PREFIX: stores
+      # Platform Paystack keys (subscription billing) — the provider boundary
+      # is mocked in tests, so dummies are enough here.
+      PLATFORM_PAYSTACK_SECRET_KEY: sk_test_platform
+      PLATFORM_PAYSTACK_PUBLIC_KEY: pk_test_platform
+      SUBSCRIPTION_GRACE_PERIOD_MS: 3d
+      SUBSCRIPTION_SWEEP_INTERVAL_MS: 1h
+      FRONTEND_URL: https://brikoh.com
+      CORS_EXTRA_ORIGINS: https://preview-1.arena.site
+      INVITE_EXPIRES_IN: 7d
+      # Dummies: the Resend sender is mocked at the client boundary in
+      # tests — the suite never performs a real send.
+      RESEND_API_KEY: re_test-key
+      RESEND_FROM_EMAIL_ACCOUNT: welcome@example.com
+      RESEND_FROM_EMAIL_INVITE: hello@example.com
+      RESEND_FROM_EMAIL_ALERT: notifications@example.com
+      RESEND_FROM_EMAIL_RECEIPT: receipts@example.com
+      # Dummies: the Google OAuth client is mocked at the Google boundary
+      # in tests — the suite never performs a real code exchange.
+      GOOGLE_CLIENT_ID: test-client-id.apps.googleusercontent.com
+      GOOGLE_CLIENT_SECRET: GOCSPX-test-client-secret
+      # Dummy 32-byte master key (hex) — encryption/decryption is pure
+      # local computation and never touches the network.
+      PAYMENT_ENCRYPTION_KEY: 1db5a19a658e95377a8ff8d0596e779bb78cd84afd22907a56b52d234b4f9b50
+      # TRUST PROXY is set to 0 in CI because the test suite uses supertest to
+      # make requests to the backend, and supertest does not set the X-Forwarded-For header. If the backend is configured to trust the proxy, it will treat
+      # the request as coming from the proxy.
+      TRUST_PROXY: 0
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: brikoh_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: oja-backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
