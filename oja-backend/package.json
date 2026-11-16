@@ -1,0 +1,75 @@
+{
+  "name": "brikoh-backend",
+  "version": "0.1.0",
+  "description": "Brikoh — multi-tenant e-commerce/business management SaaS backend API",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch server.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:generate": "prisma generate",
+    "db:check": "tsx scripts/db-connect.ts",
+    "db:seed": "prisma db seed",
+    "db:seed:admins": "tsx scripts/seedAdmins.ts",
+    "db:migrate:dev": "prisma migrate deploy"
+  },
+  "keywords": [],
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.9.1",
+    "@prisma/client": "^7.9.1",
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "google-auth-library": "^11.0.2",
+    "helmet": "^8.3.0",
+    "jsonwebtoken": "^9.0.3",
+    "otplib": "^13.4.1",
+    "pg": "^8.22.0",
+    "resend": "^6.18.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/bcrypt": "^6.0.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^26.1.2",
+    "@types/supertest": "^7.2.1",
+    "eslint": "^10.8.0",
+    "eslint-config-prettier": "^10.1.8",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.3.0",
+    "prettier": "^3.9.6",
+    "prisma": "^7.9.1",
+    "supertest": "^7.2.2",
+    "tsx": "^4.23.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.65.0",
+    "vitest": "^4.1.10"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{js,json,md,yaml,yml}": [
+      "prettier --write"
+    ]
+  },
+  "allowScripts": {
+    "@prisma/engines@7.9.1": true,
+    "bcrypt@6.0.0": true,
+    "esbuild@0.28.1": true,
+    "prisma@7.9.1": true
+  }
+}
