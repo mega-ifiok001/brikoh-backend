@@ -1,0 +1,78 @@
+import { AppError } from "../../lib/AppError.js";
+import { getPrismaClient } from "../../lib/prisma.js";
+import { validateOrThrow } from "../../lib/validate.js";
+import { listStoreActivityParamsSchema } from "./schemas.js";
+/**
+ * Writes one store-activity entry. The `db` argument is injected (the
+ * caller's transaction, or the global client) so the entry is atomic
+ * with the change that produced it — an activity row never outlives the
+ * mutation it records, and a rolled-back change leaves no orphan log.
+ *
+ * Rows are append-only at the DB level (store_activity_log_append_only
+ * trigger): there is no update/delete path, by design.
+ */
+export async function logStoreActivity(db, input) {
+    await db.storeActivityLog.create({
+        data: {
+            storeId: input.storeId,
+            staffMemberId: input.staffMemberId ?? null,
+            action: input.action,
+            detail: (input.detail ?? {}),
+        },
+    });
+}
+/**
+ * Reads the tenant's activity log, newest first, cursor-paginated.
+ * `start`/`end` are inclusive/exclusive UTC bounds on createdAt
+ * (end-of-day should be sent as the next day's midnight).
+ */
+export async function listStoreActivity(storeId, input) {
+    const { limit, cursor, staffMemberId, start, end } = validateOrThrow(listStoreActivityParamsSchema, input);
+    const prisma = getPrismaClient();
+    if (cursor !== undefined) {
+        const cursorRow = await prisma.storeActivityLog.findUnique({
+            where: { id: cursor },
+            select: { id: true },
+        });
+        if (cursorRow === null) {
+            throw new AppError(400, "VALIDATION_ERROR", "Invalid cursor");
+        }
+    }
+    const where = {
+        storeId,
+        ...(staffMemberId !== undefined ? { staffMemberId } : {}),
+        // Built in one object — separate spreads would clobber each other.
+        ...(start !== undefined || end !== undefined
+            ? {
+                createdAt: {
+                    ...(start !== undefined ? { gte: new Date(start) } : {}),
+                    ...(end !== undefined ? { lt: new Date(end) } : {}),
+                },
+            }
+            : {}),
+    };
+    const [rows, total] = await Promise.all([
+        prisma.storeActivityLog.findMany({
+            where,
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+            take: limit + 1,
+            skip: cursor === undefined ? 0 : 1,
+            cursor: cursor === undefined ? undefined : { id: cursor },
+        }),
+        prisma.storeActivityLog.count({ where }),
+    ]);
+    const hasMore = rows.length > limit;
+    return {
+        items: rows.slice(0, limit).map((row) => ({
+            id: row.id,
+            storeId: row.storeId,
+            staffMemberId: row.staffMemberId,
+            action: row.action,
+            detail: row.detail,
+            createdAt: row.createdAt,
+        })),
+        nextCursor: hasMore ? rows[limit - 1].id : null,
+        total,
+    };
+}
+//# sourceMappingURL=service.js.map
