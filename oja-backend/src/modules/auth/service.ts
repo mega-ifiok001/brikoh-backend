@@ -1,6 +1,6 @@
 import bcrypt from "bcrypt";
-import { createHash, randomBytes } from "node:crypto";
-import type { $Enums } from "../../../generated/prisma/client.js";
+import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
+import type { $Enums, Prisma } from "../../../generated/prisma/client.js";
 import type { AccountGetPayload } from "../../../generated/prisma/models/Account.js";
 import { AppError } from "../../lib/AppError.js";
 import { PERMISSIONS } from "../../lib/permissions.js";
@@ -26,7 +26,8 @@ import {
   registerSchema,
   resetPasswordSchema,
   validateOrThrow,
-  verificationTokenSchema,
+  verifyEmailSchema,
+  verifyPasswordResetOtpSchema,
   type ChangePasswordInput,
   type GoogleSignInInput,
   type LoginInput,
@@ -40,7 +41,7 @@ export type AuthRole = "OWNER" | $Enums.StaffRole;
 /** Verification email payload and outbound channel (mirrors the staff-invite contract). */
 export interface VerificationEmailData {
   to: string;
-  token: string;
+  code: string;
   expiresAt: Date;
 }
 
@@ -51,7 +52,7 @@ export interface VerificationEmailSender {
 
 export interface PasswordResetEmailData {
   to: string;
-  token: string;
+  code: string;
   expiresAt: Date;
 }
 
@@ -70,20 +71,39 @@ export interface WelcomeEmailSender {
   sendWelcomeEmail(data: WelcomeEmailData): Promise<void>;
 }
 
-/** Verification token validity window: 24 hours. */
-export const VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+const OTP_TTL_MS = env.OTP_TTL_MINUTES * 60_000;
+const OTP_COOLDOWN_MS = env.OTP_RESEND_COOLDOWN_SECONDS * 1000;
+const OTP_WINDOW_MS = env.OTP_REQUEST_WINDOW_MINUTES * 60_000;
+const OTP_MAX_ATTEMPTS = env.OTP_MAX_ATTEMPTS;
+const OTP_MAX_REQUESTS = env.OTP_MAX_REQUESTS_PER_WINDOW;
+const RESET_GRANT_TTL_MS = 10 * 60_000;
 
-/** Resend cooldown: at most one verification email per 60 seconds. */
-export const VERIFICATION_RESEND_COOLDOWN_MS = 60_000;
+export type OtpPurpose = $Enums.OtpPurpose;
 
-/** Password reset links expire one hour after they are issued. */
-export const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
-/** Avoid repeated reset-email delivery to the same account in a short window. */
-export const PASSWORD_RESET_COOLDOWN_MS = 60_000;
+/** Six-digit uniformly random OTP. Leading zeroes are deliberately retained. */
+export function generateOtpCode(): string {
+  return randomInt(0, 1_000_000).toString().padStart(6, "0");
+}
 
-/** Fresh single-use verification token: `vrf_` + 32 bytes base64url. */
-export function generateVerificationToken(): string {
-  return `vrf_${randomBytes(32).toString("base64url")}`;
+function hashOtpCode(
+  accountId: string,
+  purpose: OtpPurpose,
+  destination: string,
+  code: string,
+): string {
+  return createHmac("sha256", env.OTP_HMAC_SECRET)
+    .update(`${purpose}\0${accountId}\0${destination}\0${code}`)
+    .digest("hex");
+}
+
+function sameDigest(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left, "hex");
+  const rightBuffer = Buffer.from(right, "hex");
+  return leftBuffer.length === 32 && rightBuffer.length === 32 && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function invalidOtpError(): AppError {
+  return new AppError(400, "OTP_INVALID", "The code is invalid or expired. Request a new code.");
 }
 
 /**
@@ -259,16 +279,81 @@ export async function revokeAllRefreshTokens(accountId: string): Promise<number>
  * mirroring the invite-token pattern where the token itself is the
  * credential presented via email link).
  */
-export async function issueVerificationToken(
+interface IssuedOtp {
+  challengeId: string;
+  code: string;
+  expiresAt: Date;
+}
+
+/** Issue under an account row lock so concurrent requests cannot race rotation or quotas. */
+async function issueOtp(
   accountId: string,
-  expiresInMs = VERIFICATION_TOKEN_TTL_MS,
-): Promise<{ token: string; expiresAt: Date }> {
-  const token = generateVerificationToken();
-  const expiresAt = new Date(Date.now() + expiresInMs);
-  await getPrismaClient().accountVerificationToken.create({
-    data: { token, accountId, expiresAt },
+  purpose: OtpPurpose,
+  destination: string,
+): Promise<IssuedOtp> {
+  const prisma = getPrismaClient();
+  const normalizedDestination = destination.trim().toLowerCase();
+  const now = new Date();
+  const code = generateOtpCode();
+  const expiresAt = new Date(now.getTime() + OTP_TTL_MS);
+  const codeHash = hashOtpCode(accountId, purpose, normalizedDestination, code);
+
+  return prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "Account" WHERE "id" = ${accountId}::uuid FOR UPDATE
+    `;
+    if (locked.length === 0) throw new AppError(404, "ACCOUNT_NOT_FOUND", "Account not found");
+
+    const latest = await tx.otpChallenge.findFirst({
+      where: { accountId, purpose, destination: normalizedDestination },
+      orderBy: { createdAt: "desc" },
+      select: { id: true, createdAt: true },
+    });
+    if (latest !== null && latest.createdAt.getTime() > now.getTime() - OTP_COOLDOWN_MS) {
+      throw new AppError(429, "RATE_LIMITED", "Please wait before requesting another code");
+    }
+
+    const requestCount = await tx.otpChallenge.count({
+      where: {
+        accountId,
+        purpose,
+        destination: normalizedDestination,
+        createdAt: { gte: new Date(now.getTime() - OTP_WINDOW_MS) },
+      },
+    });
+    if (requestCount >= OTP_MAX_REQUESTS) {
+      throw new AppError(429, "RATE_LIMITED", "Code request limit reached; try again later");
+    }
+
+    await tx.otpChallenge.updateMany({
+      where: {
+        accountId,
+        purpose,
+        destination: normalizedDestination,
+        usedAt: null,
+        invalidatedAt: null,
+      },
+      data: { invalidatedAt: now },
+    });
+    const challenge = await tx.otpChallenge.create({
+      data: {
+        accountId,
+        purpose,
+        destination: normalizedDestination,
+        codeHash,
+        expiresAt,
+      },
+      select: { id: true },
+    });
+    return { challengeId: challenge.id, code, expiresAt };
   });
-  return { token, expiresAt };
+}
+
+async function invalidateOtp(challengeId: string): Promise<void> {
+  await getPrismaClient().otpChallenge.updateMany({
+    where: { id: challengeId, usedAt: null, invalidatedAt: null },
+    data: { invalidatedAt: new Date() },
+  });
 }
 
 /**
@@ -279,15 +364,14 @@ export async function issueVerificationToken(
 async function sendVerificationEmailBestEffort(
   sender: VerificationEmailSender,
   data: VerificationEmailData,
+  challengeId: string,
 ): Promise<void> {
   try {
     await sender.sendVerificationEmail(data);
   } catch (err) {
-    console.error(
-      `[verify-email] failed to send verification email to ${data.to}: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
+    void err;
+    console.error("[verify-email] code delivery failed");
+    await invalidateOtp(challengeId);
   }
 }
 
@@ -345,12 +429,16 @@ export async function register(
     throw err;
   }
 
-  const { token, expiresAt } = await issueVerificationToken(account.id);
+  const { challengeId, code, expiresAt } = await issueOtp(
+    account.id,
+    "EMAIL_VERIFICATION",
+    account.email,
+  );
   await sendVerificationEmailBestEffort(sender, {
     to: account.email,
-    token,
+    code,
     expiresAt,
-  });
+  }, challengeId);
 
   const refreshToken = await issueRefreshToken(account.id);
   const accessToken = signAccessToken({ sub: account.id, role: "" });
@@ -374,82 +462,99 @@ export async function register(
 }
 
 /**
- * Verifies an account's email by consuming a single-use token. The token
- * itself is the credential (like the invite token); the request is
- * anonymous. Consumption is race-safe: an updateMany with usedAt: null
- * means exactly one concurrent link click wins; the loser still
- * resolves success because the account ends up verified either way.
- * Idempotent for already-verified accounts (re-clicked or stale links
- * never error once the goal state is reached).
+ * Verify and consume a challenge under the account lock. Every issuance and
+ * verification uses this lock order, serializing resend, attempts, and OTP
+ * consumption without allowing concurrent requests to exceed the attempt cap.
  */
-export async function verifyEmail(rawToken: unknown): Promise<{ verified: true }> {
-  const token = validateOrThrow(verificationTokenSchema, rawToken);
+async function consumeOtp<T>(
+  rawEmail: string,
+  code: string,
+  purpose: OtpPurpose,
+  onConsumed: (tx: Prisma.TransactionClient, accountId: string, now: Date) => Promise<T>,
+): Promise<T> {
+  const email = rawEmail.trim().toLowerCase();
   const prisma = getPrismaClient();
-
-  const row = await prisma.accountVerificationToken.findUnique({ where: { token } });
-  if (row === null) {
-    throw new AppError(
-      404,
-      "VERIFICATION_INVALID",
-      "This verification link is invalid or has expired — request a new one",
-    );
-  }
-
-  const account = await prisma.account.findUnique({ where: { id: row.accountId } });
-  if (account === null) {
-    throw new AppError(
-      404,
-      "VERIFICATION_INVALID",
-      "This verification link is invalid or has expired — request a new one",
-    );
-  }
-
-  // Already verified: the link's job is done, resolve instead of erroring.
-  if (account.emailVerifiedAt !== null) {
-    return { verified: true };
-  }
-  if (row.usedAt !== null) {
-    throw new AppError(
-      404,
-      "VERIFICATION_INVALID",
-      "This verification link has already been used — request a new one",
-    );
-  }
-  if (row.expiresAt.getTime() <= Date.now()) {
-    throw new AppError(
-      404,
-      "VERIFICATION_INVALID",
-      "This verification link has expired — request a new one",
-    );
-  }
-
-  const consumed = await prisma.accountVerificationToken.updateMany({
-    where: { id: row.id, usedAt: null },
-    data: { usedAt: new Date() },
+  const account = await prisma.account.findUnique({
+    where: { email },
+    select: { id: true },
   });
-  if (consumed.count === 0) {
-    // Lost a concurrent-verification race — the account is verified by
-    // the winner, so the outcome is the same for the client.
-    return { verified: true };
-  }
+  if (account === null) throw invalidOtpError();
 
-  await prisma.account.update({
-    where: { id: row.accountId },
-    data: { emailVerifiedAt: new Date() },
+  const result = await prisma.$transaction(async (tx) => {
+    const now = new Date();
+    const locked = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "Account" WHERE "id" = ${account.id}::uuid FOR UPDATE
+    `;
+    if (locked.length === 0) return { success: false as const };
+
+    const challenge = await tx.otpChallenge.findFirst({
+      where: {
+        accountId: account.id,
+        purpose,
+        destination: email,
+        usedAt: null,
+        invalidatedAt: null,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    if (
+      challenge === null ||
+      challenge.expiresAt.getTime() <= now.getTime() ||
+      challenge.attempts >= OTP_MAX_ATTEMPTS
+    ) {
+      return { success: false as const };
+    }
+
+    const submittedHash = hashOtpCode(account.id, purpose, email, code);
+    if (!sameDigest(challenge.codeHash, submittedHash)) {
+      const attempts = challenge.attempts + 1;
+      await tx.otpChallenge.updateMany({
+        where: {
+          id: challenge.id,
+          attempts: challenge.attempts,
+          usedAt: null,
+          invalidatedAt: null,
+          expiresAt: { gt: now },
+        },
+        data: {
+          attempts,
+          ...(attempts >= OTP_MAX_ATTEMPTS ? { invalidatedAt: now } : {}),
+        },
+      });
+      return { success: false as const };
+    }
+
+    const claimed = await tx.otpChallenge.updateMany({
+      where: {
+        id: challenge.id,
+        attempts: { lt: OTP_MAX_ATTEMPTS },
+        usedAt: null,
+        invalidatedAt: null,
+        expiresAt: { gt: now },
+      },
+      data: { usedAt: now },
+    });
+    if (claimed.count !== 1) return { success: false as const };
+    return { success: true as const, value: await onConsumed(tx, account.id, now) };
   });
-  return { verified: true };
+
+  if (!result.success) throw invalidOtpError();
+  return result.value;
+}
+
+export async function verifyEmail(rawInput: unknown): Promise<{ verified: true }> {
+  const { email, code } = validateOrThrow(verifyEmailSchema, rawInput);
+  return consumeOtp(email, code, "EMAIL_VERIFICATION", async (tx, accountId, now) => {
+    await tx.account.update({ where: { id: accountId }, data: { emailVerifiedAt: now } });
+    return { verified: true as const };
+  });
 }
 
 function hashPasswordResetToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-/**
- * Always returns the same result for a syntactically valid email so callers
- * cannot use this endpoint to discover which addresses have accounts.
- * The emailed credential is 256 bits of randomness; only its SHA-256 digest
- * is persisted. A per-account cooldown complements the public IP limiter.
- */
+/** Always returns the same result for a valid email, whether the account exists or not. */
 export async function requestPasswordReset(
   rawInput: unknown,
   sender: PasswordResetEmailSender,
@@ -462,87 +567,90 @@ export async function requestPasswordReset(
   });
   if (account === null) return { accepted: true };
 
-  const now = new Date();
-  await prisma.passwordResetToken.deleteMany({
-    where: {
-      accountId: account.id,
-      OR: [{ expiresAt: { lte: now } }, { usedAt: { not: null } }],
-    },
-  });
-
-  const recentToken = await prisma.passwordResetToken.findFirst({
-    where: {
-      accountId: account.id,
-      usedAt: null,
-      expiresAt: { gt: now },
-      createdAt: { gte: new Date(now.getTime() - PASSWORD_RESET_COOLDOWN_MS) },
-    },
-    select: { id: true },
-  });
-  if (recentToken !== null) return { accepted: true };
-
-  const token = `rst_${randomBytes(32).toString("base64url")}`;
-  const expiresAt = new Date(now.getTime() + PASSWORD_RESET_TTL_MS);
-  await prisma.passwordResetToken.create({
-    data: {
-      accountId: account.id,
-      tokenHash: hashPasswordResetToken(token),
-      expiresAt,
-    },
-  });
+  let challenge: IssuedOtp;
+  try {
+    challenge = await issueOtp(account.id, "PASSWORD_RESET", account.email);
+  } catch (err) {
+    // Keep account-level cooldown/quota results indistinguishable from an
+    // unknown address. The route's IP limiter still returns a generic 429.
+    if (err instanceof AppError && err.statusCode === 429) return { accepted: true };
+    throw err;
+  }
 
   try {
-    await sender.sendPasswordResetEmail({ to: account.email, token, expiresAt });
-  } catch (err) {
-    // Keep the public response indistinguishable for existing and unknown
-    // accounts. Do not log the recipient or the reset credential.
-    console.error(
-      `[password-reset] email delivery failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    await sender.sendPasswordResetEmail({
+      to: account.email,
+      code: challenge.code,
+      expiresAt: challenge.expiresAt,
+    });
+  } catch {
+    console.error("[password-reset] code delivery failed");
+    await invalidateOtp(challenge.challengeId);
   }
   return { accepted: true };
 }
 
+/** Consume a reset OTP and issue a separate, short-lived reset grant. */
+export async function verifyPasswordResetOtp(rawInput: unknown): Promise<{ resetToken: string }> {
+  const { email, code } = validateOrThrow(verifyPasswordResetOtpSchema, rawInput);
+  const resetToken = `rst_${randomBytes(32).toString("base64url")}`;
+  const tokenHash = hashPasswordResetToken(resetToken);
+  return consumeOtp(email, code, "PASSWORD_RESET", async (tx, accountId, now) => {
+    await tx.passwordResetToken.updateMany({
+      where: { accountId, usedAt: null },
+      data: { usedAt: now },
+    });
+    await tx.passwordResetToken.create({
+      data: {
+        accountId,
+        tokenHash,
+        expiresAt: new Date(now.getTime() + RESET_GRANT_TTL_MS),
+      },
+    });
+    return { resetToken };
+  });
+}
+
 /**
- * Consumes a reset link exactly once, changes the password, invalidates any
- * other outstanding reset links, and revokes all refresh sessions atomically.
+ * Consumes a short-lived reset grant exactly once, changes the password,
+ * invalidates every other grant, and revokes all refresh sessions atomically.
  */
 export async function resetPassword(rawInput: unknown): Promise<void> {
-  const { token, newPassword } = validateOrThrow(resetPasswordSchema, rawInput);
+  const { resetToken: resetTokenValue, newPassword } = validateOrThrow(resetPasswordSchema, rawInput);
   const prisma = getPrismaClient();
-  const tokenHash = hashPasswordResetToken(token);
-  const resetToken = await prisma.passwordResetToken.findUnique({ where: { tokenHash } });
+  const tokenHash = hashPasswordResetToken(resetTokenValue);
+  const resetGrant = await prisma.passwordResetToken.findUnique({ where: { tokenHash } });
   const now = new Date();
   if (
-    resetToken === null ||
-    resetToken.usedAt !== null ||
-    resetToken.expiresAt.getTime() <= now.getTime()
+    resetGrant === null ||
+    resetGrant.usedAt !== null ||
+    resetGrant.expiresAt.getTime() <= now.getTime()
   ) {
     throw new AppError(
       400,
       "PASSWORD_RESET_INVALID",
-      "This password reset link is invalid or has expired. Request a new one.",
+      "This password reset session is invalid or has expired. Request a new code.",
     );
   }
 
   const passwordHash = await bcrypt.hash(newPassword, BCRYPT_COST);
   const consumed = await prisma.$transaction(async (tx) => {
     const claim = await tx.passwordResetToken.updateMany({
-      where: { id: resetToken.id, usedAt: null, expiresAt: { gt: now } },
+      where: { id: resetGrant.id, usedAt: null, expiresAt: { gt: now } },
       data: { usedAt: now },
     });
     if (claim.count !== 1) return false;
 
     await tx.account.update({
-      where: { id: resetToken.accountId },
+      where: { id: resetGrant.accountId },
       data: { passwordHash },
     });
     await tx.refreshToken.updateMany({
-      where: { accountId: resetToken.accountId, revokedAt: null },
+      where: { accountId: resetGrant.accountId, revokedAt: null },
       data: { revokedAt: now },
     });
     await tx.passwordResetToken.updateMany({
-      where: { accountId: resetToken.accountId, usedAt: null },
+      where: { accountId: resetGrant.accountId, usedAt: null },
       data: { usedAt: now },
     });
     return true;
@@ -552,17 +660,12 @@ export async function resetPassword(rawInput: unknown): Promise<void> {
     throw new AppError(
       400,
       "PASSWORD_RESET_INVALID",
-      "This password reset link is invalid or has expired. Request a new one.",
+      "This password reset session is invalid or has expired. Request a new code.",
     );
   }
 }
 
-/**
- * Issues a fresh verification token and re-sends the email. Rotates the
- * account's prior pending token (at most one pending token per account)
- * and rate-limits sends to one per 60 seconds. Already-verified accounts
- * are rejected — there is nothing to resend.
- */
+/** Issues a fresh email-verification OTP, rotating the prior challenge. */
 export async function resendVerification(
   accountId: string,
   sender: VerificationEmailSender,
@@ -577,33 +680,12 @@ export async function resendVerification(
     throw new AppError(409, "ALREADY_VERIFIED", "Email is already verified — you can sign in now");
   }
 
-  const latest = await prisma.accountVerificationToken.findFirst({
-    where: { accountId },
-    orderBy: { createdAt: "desc" },
-  });
-  if (
-    latest !== null &&
-    latest.createdAt.getTime() > Date.now() - VERIFICATION_RESEND_COOLDOWN_MS
-  ) {
-    throw new AppError(
-      429,
-      "RATE_LIMITED",
-      "Verification email was sent recently — please wait a moment and try again",
-    );
-  }
-
-  // Rotate: one pending token per account. Used/expired leftovers are
-  // cleaned by deleteExpiredVerificationTokens; revoking the prior
-  // PENDING one here keeps the link in the newest email authoritative.
-  await prisma.accountVerificationToken.deleteMany({
-    where: { accountId, usedAt: null, expiresAt: { gt: new Date() } },
-  });
-  const { token, expiresAt } = await issueVerificationToken(accountId);
+  const challenge = await issueOtp(accountId, "EMAIL_VERIFICATION", account.email);
   await sendVerificationEmailBestEffort(sender, {
     to: account.email,
-    token,
-    expiresAt,
-  });
+    code: challenge.code,
+    expiresAt: challenge.expiresAt,
+  }, challenge.challengeId);
   return { sent: true };
 }
 
@@ -1110,11 +1192,53 @@ export async function deleteExpiredInviteTokens(): Promise<{ count: number }> {
  * a one-way state transition recorded on the Account. Safe to call
  * repeatedly; returns the number of rows deleted.
  */
-export async function deleteExpiredVerificationTokens(): Promise<{ count: number }> {
-  const result = await getPrismaClient().accountVerificationToken.deleteMany({
-    where: { OR: [{ expiresAt: { lt: new Date() } }, { usedAt: { not: null } }] },
+export async function deleteExpiredOtpChallenges(retentionDays = 90): Promise<{ count: number }> {
+  const now = new Date();
+  const cutoff = new Date(now.getTime() - retentionDays * 86_400_000);
+  const result = await getPrismaClient().otpChallenge.deleteMany({
+    where: {
+      createdAt: { lt: cutoff },
+      OR: [
+        { expiresAt: { lt: now } },
+        { usedAt: { not: null } },
+        { invalidatedAt: { not: null } },
+      ],
+    },
   });
   return { count: result.count };
+}
+
+/** Backwards-named compatibility wrapper for callers during the link-to-OTP migration. */
+export async function deleteExpiredVerificationTokens(): Promise<{ count: number }> {
+  return deleteExpiredOtpChallenges();
+}
+
+export async function deleteExpiredPasswordResetGrants(retentionDays = 90): Promise<{ count: number }> {
+  const now = new Date();
+  const cutoff = new Date(now.getTime() - retentionDays * 86_400_000);
+  const result = await getPrismaClient().passwordResetToken.deleteMany({
+    where: { OR: [{ expiresAt: { lt: now } }, { usedAt: { lt: cutoff } }] },
+  });
+  return { count: result.count };
+}
+
+/** Periodically removes spent OTP/grant rows after the audit retention period. */
+export function startAuthOtpCleanup(): void {
+  if (env.NODE_ENV === "test") return;
+  const run = async () => {
+    try {
+      const [otps, grants] = await Promise.all([
+        deleteExpiredOtpChallenges(),
+        deleteExpiredPasswordResetGrants(),
+      ]);
+      if (otps.count + grants.count > 0) console.info("[auth] expired OTP data cleaned");
+    } catch {
+      console.error("[auth] OTP cleanup failed");
+    }
+  };
+  void run();
+  const timer = setInterval(() => void run(), env.OTP_CLEANUP_INTERVAL_MS);
+  timer.unref();
 }
 
 /**

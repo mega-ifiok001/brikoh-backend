@@ -4,10 +4,11 @@ const resendMocks = vi.hoisted(() => ({ Resend: vi.fn() }));
 vi.mock("resend", () => ({ Resend: resendMocks.Resend }));
 
 import { env } from "../../config/env.js";
-import type { VerificationEmailData } from "./service.js";
+import type { PasswordResetEmailData, VerificationEmailData } from "./service.js";
+import { clearTestOtpOutbox, takeTestOtp } from "./testOtpOutbox.js";
 import {
-  buildVerificationLink,
   buildVerificationEmail,
+  buildPasswordResetEmail,
   buildWelcomeEmail,
   ConsoleVerificationSender,
   ConsoleWelcomeSender,
@@ -18,20 +19,26 @@ import {
 
 const EMAIL_DATA: VerificationEmailData = {
   to: "owner@example.com",
-  token: "vrf_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO123456",
+  code: "042817",
   expiresAt: new Date("2026-08-10T12:00:00Z"),
 };
 
+const RESET_EMAIL_DATA: PasswordResetEmailData = {
+  to: "owner@example.com",
+  code: "681204",
+  expiresAt: new Date("2026-08-10T12:10:00Z"),
+};
+
 describe("buildVerificationEmail (unit)", () => {
-  it("builds an HTML+text verification email with CTA link and readable expiry", () => {
+  it("builds an HTML+text verification email with a code and readable expiry", () => {
     const email = buildVerificationEmail(EMAIL_DATA);
 
     expect(email.subject).toContain("Brikoh");
-
-    expect(email.html).toContain(`href="${buildVerificationLink(EMAIL_DATA.token)}"`);
+    expect(email.html).toContain(EMAIL_DATA.code);
+    expect(email.text).toContain(EMAIL_DATA.code);
+    expect(email.html).not.toContain("/verify-email");
+    expect(email.text).not.toContain("/verify-email");
     expect(email.html).toContain("Monday, August 10, 2026");
-
-    expect(email.text).toContain(buildVerificationLink(EMAIL_DATA.token));
     expect(email.text).toContain("Monday, August 10, 2026");
   });
 
@@ -75,8 +82,8 @@ describe("ResendVerificationSender (unit)", () => {
         from: "verify@example.com",
         to: EMAIL_DATA.to,
         subject: expect.stringContaining("Brikoh"),
-        html: expect.stringContaining(`/verify-email?token=${EMAIL_DATA.token}`),
-        text: expect.stringContaining(env.FRONTEND_URL),
+        html: expect.stringContaining(EMAIL_DATA.code),
+        text: expect.stringContaining(EMAIL_DATA.code),
       }),
     );
   });
@@ -91,15 +98,24 @@ describe("ResendVerificationSender (unit)", () => {
 });
 
 describe("ConsoleVerificationSender (unit)", () => {
-  it("logs the verify link and expiry for development", async () => {
+  it("captures the OTP in the test outbox without logging it", async () => {
+    clearTestOtpOutbox();
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
     await new ConsoleVerificationSender().sendVerificationEmail(EMAIL_DATA);
 
-    expect(logSpy).toHaveBeenCalledWith(
-      expect.stringContaining(buildVerificationLink(EMAIL_DATA.token)),
-    );
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("Monday, August 10, 2026"));
+    expect(takeTestOtp(EMAIL_DATA.to, "EMAIL_VERIFICATION")?.code).toBe(EMAIL_DATA.code);
+    expect(logSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("buildPasswordResetEmail (unit)", () => {
+  it("contains the reset OTP and no reset URL", () => {
+    const email = buildPasswordResetEmail(RESET_EMAIL_DATA);
+    expect(email.html).toContain(RESET_EMAIL_DATA.code);
+    expect(email.text).toContain(RESET_EMAIL_DATA.code);
+    expect(email.html).not.toContain("reset-password?");
+    expect(email.text).not.toContain("reset-password?");
   });
 });
 

@@ -20,7 +20,7 @@ paths:
     post:
       tags: [Merchant authentication]
       summary: Register an account
-      description: Creates an account and returns a session. Email verification is sent best-effort; an unverified account cannot complete onboarding.
+      description: Creates an account and returns a session. A six-digit email-verification code is sent best-effort; the code expires after the configured OTP lifetime and an unverified account cannot complete onboarding.
       operationId: registerAccount
       requestBody:
         required: true
@@ -176,8 +176,8 @@ paths:
   /api/public/auth/verify:
     post:
       tags: [Account security]
-      summary: Verify an account email
-      description: Submit the single-use verification token from the email. Tokens start with vrf_.
+      summary: Verify an account email with a one-time code
+      description: Submit the email address and six-digit code received after registration or via resend-verification. Codes are purpose-bound, expire, and can only be used once. An invalid, expired, exhausted, or already-used code is rejected.
       operationId: verifyEmail
       requestBody:
         required: true
@@ -185,10 +185,11 @@ paths:
           application/json:
             schema:
               type: object
-              required: [token]
+              required: [email, code]
               properties:
-                token: { type: string, maxLength: 256, pattern: '^vrf_', example: vrf_fake-single-use-verification-token }
-            example: { token: vrf_fake-single-use-verification-token }
+                email: { type: string, format: email, example: ada.okafor@example.com }
+                code: { type: string, pattern: '^\\d{6}$', minLength: 6, maxLength: 6, example: '482916', description: Six-digit code sent to this email address. }
+            example: { email: ada.okafor@example.com, code: '482916' }
       responses:
         '200':
           description: Email verified
@@ -196,12 +197,17 @@ paths:
             application/json:
               schema: { type: object, properties: { verified: { type: boolean, const: true } }, required: [verified] }
               example: { verified: true }
-        '400': { $ref: '#/components/responses/ValidationError' }
+        '400':
+          description: Malformed request or invalid, expired, already-used verification code
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              example: { error: { code: OTP_INVALID, message: 'The code is invalid or expired. Request a new code.' } }
   /api/public/auth/forgot-password:
     post:
       tags: [Account security]
-      summary: Request a password reset link
-      description: Always returns the same response for an existing or unknown address to prevent account discovery. A real reset token is delivered by email, expires after one hour, and is single-use.
+      summary: Request a password-reset code
+      description: Always returns the same response for an existing or unknown address to prevent account discovery. An eligible account receives a purpose-bound six-digit code by email. The code expires after the configured OTP lifetime and is single-use.
       operationId: requestPasswordReset
       requestBody:
         required: true
@@ -218,21 +224,57 @@ paths:
           content:
             application/json:
               schema: { type: object, required: [message], properties: { message: { type: string } } }
-              example: { message: 'If an account exists for that email, password reset instructions will be sent.' }
+              example: { message: 'If an account exists for that email, a password reset code will be sent.' }
         '400': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/public/auth/reset-password/verify:
+    post:
+      tags: [Account security]
+      summary: Verify a password-reset code
+      description: Consumes the single-use password-reset OTP and returns a short-lived, single-use resetToken. Keep the resetToken private and submit it only to reset-password.
+      operationId: verifyPasswordResetOtp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, code]
+              properties:
+                email: { type: string, format: email, example: ada.okafor@example.com }
+                code: { type: string, pattern: '^\\d{6}$', minLength: 6, maxLength: 6, example: '482916' }
+            example: { email: ada.okafor@example.com, code: '482916' }
+      responses:
+        '200':
+          description: Code accepted; reset grant issued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [resetToken]
+                properties:
+                  resetToken: { type: string, pattern: '^rst_', description: Short-lived, single-use authorization to set the new password. }
+              example: { resetToken: rst_fake-single-use-reset-token }
+        '400':
+          description: Malformed request or invalid, expired, already-used code
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              example: { error: { code: OTP_INVALID, message: 'The code is invalid or expired. Request a new code.' } }
         '429': { $ref: '#/components/responses/RateLimited' }
   /api/public/auth/reset-password:
     post:
       tags: [Account security]
-      summary: Set a new password using a reset token
-      description: The reset token is sent by email and starts with rst_. On success, all existing refresh sessions are revoked and the token cannot be reused.
+      summary: Set a new password using a reset grant
+      description: Submit the resetToken returned by reset-password/verify. The grant is short-lived and single-use. On success, all existing refresh sessions are revoked.
       operationId: resetPassword
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: '#/components/schemas/ResetPasswordRequest' }
-            example: { token: rst_fake-single-use-reset-token, newPassword: NewPass456, confirmPassword: NewPass456 }
+            example: { resetToken: rst_fake-single-use-reset-token, newPassword: NewPass456, confirmPassword: NewPass456 }
       responses:
         '200':
           description: Password changed; sign in again
@@ -245,12 +287,12 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
-              example: { error: { code: PASSWORD_RESET_INVALID, message: 'This password reset link is invalid or has expired. Request a new one.' } }
+              example: { error: { code: PASSWORD_RESET_INVALID, message: 'This password reset session is invalid or has expired. Request a new code.' } }
         '429': { $ref: '#/components/responses/RateLimited' }
   /api/dashboard/resend-verification:
     post:
       tags: [Account security]
-      summary: Resend the signed-in account's verification email
+      summary: Resend the signed-in account's email-verification code
       operationId: resendVerification
       security: [{ BearerAuth: [] }]
       responses:
@@ -567,9 +609,10 @@ components:
         refreshToken: { type: string, minLength: 1, example: rt_fake-token-id.fake-secret }
     ResetPasswordRequest:
       type: object
-      required: [token, newPassword, confirmPassword]
+      additionalProperties: false
+      required: [resetToken, newPassword, confirmPassword]
       properties:
-        token: { type: string, maxLength: 128, pattern: '^rst_', example: rst_fake-single-use-reset-token }
+        resetToken: { type: string, maxLength: 128, pattern: '^rst_', example: rst_fake-single-use-reset-token }
         newPassword: { $ref: '#/components/schemas/Password' }
         confirmPassword: { type: string, minLength: 1, example: NewPass456 }
     ChangePasswordRequest:

@@ -12,11 +12,12 @@ import { authorize } from "../../middleware/authorize.js";
 import { env } from "../../config/env.js";
 import { formatRefreshToken, signAccessToken } from "../../lib/tokens.js";
 import { PERMISSIONS } from "../../lib/permissions.js";
+import { clearTestOtpOutbox, takeTestOtp } from "./testOtpOutbox.js";
 import {
   changePassword,
   deleteExpiredInviteTokens,
+  deleteExpiredOtpChallenges,
   deleteExpiredRefreshTokens,
-  deleteExpiredVerificationTokens,
 } from "./service.js";
 import type { $Enums } from "../../../generated/prisma/client.js";
 
@@ -46,21 +47,15 @@ async function registerViaApi(overrides: Partial<typeof VALID> = {}) {
 }
 
 /**
- * Presents the latest verification token for the account at
- * POST /api/public/auth/verify — the integration suite reads the token
- * from the database because it travels through the (stubbed) email.
+ * Retrieves the test mailer's in-memory code and submits it to verification.
+ * The test sender never writes or logs the code.
  */
 async function verifyLatestToken(email: string) {
-  const account = await prisma.account.findUnique({ where: { email } });
-  expect(account).not.toBeNull();
-  const row = await prisma.accountVerificationToken.findFirst({
-    where: { accountId: account!.id },
-    orderBy: { createdAt: "desc" },
-  });
-  expect(row).not.toBeNull();
-  const res = await request(app).post("/api/public/auth/verify").send({ token: row!.token });
+  const message = takeTestOtp(email, "EMAIL_VERIFICATION");
+  expect(message).toBeDefined();
+  const res = await request(app).post("/api/public/auth/verify").send({ email, code: message!.code });
   expect(res.status).toBe(200);
-  return { res, token: row!.token };
+  return { res, code: message!.code };
 }
 
 /** Registers and completes the email-verification step. */
@@ -135,6 +130,7 @@ async function issueRefreshRow(
 }
 
 beforeEach(async () => {
+  clearTestOtpOutbox();
   // DELETE instead of TRUNCATE: TRUNCATE fsyncs every table file
   // (DataFileImmediateSync), which is very slow on rotational disks.
   // Child tables first to satisfy foreign keys. The append-only ledger
@@ -154,7 +150,7 @@ beforeEach(async () => {
     DELETE FROM "BranchStock"; DELETE FROM "Branch";
     DELETE FROM "StaffMember"; DELETE FROM "InviteToken"; DELETE FROM "Owner";
     DELETE FROM "StoreActivityLog";
-    DELETE FROM "Subscription"; DELETE FROM "Store"; DELETE FROM "AccountVerificationToken"; DELETE FROM "Account";
+    DELETE FROM "Subscription"; DELETE FROM "Store"; DELETE FROM "OtpChallenge"; DELETE FROM "PasswordResetToken"; DELETE FROM "Account";
     ALTER TABLE "StoreActivityLog" ENABLE TRIGGER store_activity_log_append_only;
     ALTER TABLE "PurchaseOrderReceipt" ENABLE TRIGGER purchase_order_receipt_append_only;
     ALTER TABLE "PurchaseOrderPayment" ENABLE TRIGGER purchase_order_payment_append_only;
@@ -194,14 +190,16 @@ describe("POST /api/public/auth/register (integration)", () => {
     expect(owner).toBeNull();
     const stores = await prisma.store.count();
     expect(stores).toBe(0);
-    // A single-use verification token was issued for the account.
-    const tokens = await prisma.accountVerificationToken.findMany({
+    // A single-use OTP is issued; only a bound HMAC digest is stored.
+    const challenges = await prisma.otpChallenge.findMany({
       where: { accountId: account!.id },
     });
-    expect(tokens).toHaveLength(1);
-    expect(tokens[0]!.token).toMatch(/^vrf_/);
-    expect(tokens[0]!.usedAt).toBeNull();
-    expect(tokens[0]!.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    expect(challenges).toHaveLength(1);
+    expect(challenges[0]!.purpose).toBe("EMAIL_VERIFICATION");
+    expect(challenges[0]!.codeHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(challenges[0]!.codeHash).not.toBe(takeTestOtp(VALID.email, "EMAIL_VERIFICATION")?.code);
+    expect(challenges[0]!.usedAt).toBeNull();
+    expect(challenges[0]!.expiresAt.getTime()).toBeGreaterThan(Date.now());
   });
 
   it("rejects a duplicate email with EMAIL_TAKEN", async () => {
@@ -233,51 +231,101 @@ describe("POST /api/public/auth/register (integration)", () => {
 });
 
 describe("POST /api/public/auth/verify (integration)", () => {
-  it("verifies the account with the mailed token and persists emailVerifiedAt", async () => {
+  it("verifies the account with the mailed OTP and persists emailVerifiedAt", async () => {
     const reg = await registerViaApi();
 
-    const { res, token } = await verifyLatestToken(reg.body.user.email);
+    const { res } = await verifyLatestToken(reg.body.user.email);
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ verified: true });
     const account = await prisma.account.findUnique({ where: { email: reg.body.user.email } });
     expect(account?.emailVerifiedAt).not.toBeNull();
-    const row = await prisma.accountVerificationToken.findUnique({ where: { token } });
+    const row = await prisma.otpChallenge.findFirst({
+      where: { accountId: account!.id, purpose: "EMAIL_VERIFICATION" },
+    });
     expect(row?.usedAt).not.toBeNull();
   });
 
-  it("is idempotent for an already-verified account (re-clicked link)", async () => {
-    const reg = await registerAndVerify();
-    const account = await prisma.account.findUnique({ where: { email: reg.body.user.email } });
-    const row = await prisma.accountVerificationToken.findFirst({
-      where: { accountId: account!.id },
-    });
+  it("rejects reuse of a code after successful verification", async () => {
+    const reg = await registerViaApi();
+    const message = takeTestOtp(reg.body.user.email, "EMAIL_VERIFICATION")!;
+    const body = { email: reg.body.user.email, code: message.code };
+    const first = await request(app).post("/api/public/auth/verify").send(body);
+    expect(first.status).toBe(200);
 
-    const res = await request(app).post("/api/public/auth/verify").send({ token: row!.token });
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ verified: true });
+    const second = await request(app).post("/api/public/auth/verify").send(body);
+    expect(second.status).toBe(400);
+    expect(second.body.error.code).toBe("OTP_INVALID");
   });
 
-  it("rejects an unknown token with VERIFICATION_INVALID (404)", async () => {
+  it("returns the same invalid-code response for an unknown email", async () => {
     const res = await request(app)
       .post("/api/public/auth/verify")
-      .send({ token: "vrf_unknown-not-in-the-database" });
+      .send({ email: "nobody@example.com", code: "123456" });
 
-    expect(res.status).toBe(404);
-    expect(res.body.error.code).toBe("VERIFICATION_INVALID");
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("OTP_INVALID");
   });
 
-  it("rejects a malformed token with VALIDATION_ERROR (400)", async () => {
+  it("rejects missing and malformed codes with VALIDATION_ERROR (400)", async () => {
     const missing = await request(app).post("/api/public/auth/verify").send({});
     expect(missing.status).toBe(400);
     expect(missing.body.error.code).toBe("VALIDATION_ERROR");
 
-    const wrongPrefix = await request(app)
+    const malformed = await request(app)
       .post("/api/public/auth/verify")
-      .send({ token: "not-a-vrf-token" });
-    expect(wrongPrefix.status).toBe(400);
-    expect(wrongPrefix.body.error.code).toBe("VALIDATION_ERROR");
+      .send({ email: VALID.email, code: "1234" });
+    expect(malformed.status).toBe(400);
+    expect(malformed.body.error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("allows only five incorrect guesses, then invalidates the code", async () => {
+    const reg = await registerViaApi();
+    const validCode = takeTestOtp(reg.body.user.email, "EMAIL_VERIFICATION")!;
+    const wrongCode = validCode.code === "000000" ? "000001" : "000000";
+    const body = { email: reg.body.user.email, code: wrongCode };
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const res = await request(app).post("/api/public/auth/verify").send(body);
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe("OTP_INVALID");
+    }
+    const challenge = await prisma.otpChallenge.findFirst({
+      where: { accountId: reg.body.user.accountId, purpose: "EMAIL_VERIFICATION" },
+    });
+    expect(challenge?.attempts).toBe(5);
+    expect(challenge?.invalidatedAt).not.toBeNull();
+    const afterLockout = await request(app)
+      .post("/api/public/auth/verify")
+      .send({ email: reg.body.user.email, code: validCode.code });
+    expect(afterLockout.status).toBe(400);
+  });
+
+  it("allows exactly one of two concurrent valid-code submissions to consume the OTP", async () => {
+    const reg = await registerViaApi();
+    const message = takeTestOtp(reg.body.user.email, "EMAIL_VERIFICATION")!;
+    const submit = () =>
+      request(app)
+        .post("/api/public/auth/verify")
+        .send({ email: reg.body.user.email, code: message.code });
+    const results = await Promise.all([submit(), submit()]);
+
+    expect(results.map((result) => result.status).sort()).toEqual([200, 400]);
+    expect(results.find((result) => result.status === 400)?.body.error.code).toBe("OTP_INVALID");
+  });
+
+  it("rejects a code after its expiration time", async () => {
+    const reg = await registerViaApi();
+    const message = takeTestOtp(reg.body.user.email, "EMAIL_VERIFICATION")!;
+    await prisma.otpChallenge.updateMany({
+      where: { accountId: reg.body.user.accountId, purpose: "EMAIL_VERIFICATION" },
+      data: { expiresAt: new Date(Date.now() - 1000) },
+    });
+
+    const expired = await request(app)
+      .post("/api/public/auth/verify")
+      .send({ email: reg.body.user.email, code: message.code });
+    expect(expired.status).toBe(400);
+    expect(expired.body.error.code).toBe("OTP_INVALID");
   });
 
   it("verifying enables onboarding without a new login (same session works)", async () => {
@@ -298,9 +346,8 @@ describe("POST /api/public/auth/verify (integration)", () => {
 });
 
 describe("POST /api/dashboard/resend-verification (integration)", () => {
-  it("issues a fresh token and resolves sent: true", async () => {
-    // Direct-DB account: no registration token exists, so the resend
-    // is not cooldown-blocked.
+  it("issues a fresh code and resolves sent: true", async () => {
+    // Direct-DB account has no prior OTP, so resend is not cooldown-blocked.
     const { account, email } = await createAccount();
     const login = await loginViaApi(email, "password-123");
 
@@ -310,13 +357,14 @@ describe("POST /api/dashboard/resend-verification (integration)", () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ sent: true });
-    const rows = await prisma.accountVerificationToken.findMany({
-      where: { accountId: account.id },
+    const rows = await prisma.otpChallenge.findMany({
+      where: { accountId: account.id, purpose: "EMAIL_VERIFICATION" },
     });
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.token).toMatch(/^vrf_/);
+    expect(rows[0]!.codeHash).toMatch(/^[a-f0-9]{64}$/);
     expect(rows[0]!.usedAt).toBeNull();
     expect(rows[0]!.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    expect(takeTestOtp(email, "EMAIL_VERIFICATION")?.code).toMatch(/^\d{6}$/);
 
     // The fresh token verifies the account.
     await verifyLatestToken(email);
@@ -354,6 +402,110 @@ describe("POST /api/dashboard/resend-verification (integration)", () => {
 
     expect(res.status).toBe(401);
     expect(res.body.error.code).toBe("NEED_LOGIN");
+  });
+});
+
+describe("password reset OTP flow (integration)", () => {
+  it("returns a generic request response for known and unknown email addresses", async () => {
+    const { email } = await createAccount();
+    const known = await request(app).post("/api/public/auth/forgot-password").send({ email });
+    const unknown = await request(app)
+      .post("/api/public/auth/forgot-password")
+      .send({ email: "unknown@example.com" });
+
+    expect(known.status).toBe(202);
+    expect(unknown.status).toBe(202);
+    expect(known.body).toEqual(unknown.body);
+    expect(known.body.message).toMatch(/If an account exists/);
+  });
+
+  it("verifies the code, issues a one-time grant, changes the password, and revokes sessions", async () => {
+    const { account, email } = await createAccount();
+    const oldSession = await loginViaApi(email, "password-123");
+    const requested = await request(app).post("/api/public/auth/forgot-password").send({ email });
+    expect(requested.status).toBe(202);
+
+    const mail = takeTestOtp(email, "PASSWORD_RESET");
+    expect(mail?.code).toMatch(/^\d{6}$/);
+    const challenge = await prisma.otpChallenge.findFirst({
+      where: { accountId: account.id, purpose: "PASSWORD_RESET" },
+    });
+    expect(challenge?.codeHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(challenge?.codeHash).not.toBe(mail?.code);
+
+    const verified = await request(app)
+      .post("/api/public/auth/reset-password/verify")
+      .send({ email, code: mail!.code });
+    expect(verified.status).toBe(200);
+    expect(verified.body.resetToken).toMatch(/^rst_[A-Za-z0-9_-]+$/);
+
+    const changed = await request(app).post("/api/public/auth/reset-password").send({
+      resetToken: verified.body.resetToken,
+      newPassword: "new-password-456",
+      confirmPassword: "new-password-456",
+    });
+    expect(changed.status).toBe(200);
+    expect(changed.body.ok).toBe(true);
+
+    const oldLogin = await loginViaApi(email, "password-123");
+    const newLogin = await loginViaApi(email, "new-password-456");
+    expect(oldLogin.status).toBe(401);
+    expect(newLogin.status).toBe(200);
+
+    const revoked = await request(app)
+      .post("/api/public/auth/refresh")
+      .send({ refreshToken: oldSession.body.refreshToken });
+    expect(revoked.status).toBe(401);
+
+    const reusedGrant = await request(app).post("/api/public/auth/reset-password").send({
+      resetToken: verified.body.resetToken,
+      newPassword: "another-password-789",
+      confirmPassword: "another-password-789",
+    });
+    expect(reusedGrant.status).toBe(400);
+  });
+
+  it("rejects expired reset codes and preserves generic invalid-code errors", async () => {
+    const { account, email } = await createAccount();
+    await request(app).post("/api/public/auth/forgot-password").send({ email });
+    const mail = takeTestOtp(email, "PASSWORD_RESET")!;
+    await prisma.otpChallenge.updateMany({
+      where: { accountId: account.id, purpose: "PASSWORD_RESET" },
+      data: { expiresAt: new Date(Date.now() - 1000) },
+    });
+
+    const expired = await request(app)
+      .post("/api/public/auth/reset-password/verify")
+      .send({ email, code: mail.code });
+    const unknown = await request(app)
+      .post("/api/public/auth/reset-password/verify")
+      .send({ email: "nobody@example.com", code: mail.code });
+
+    expect(expired.status).toBe(400);
+    expect(expired.body.error.code).toBe("OTP_INVALID");
+    expect(unknown.status).toBe(expired.status);
+    expect(unknown.body.error.code).toBe(expired.body.error.code);
+    expect(unknown.body.error.message).toBe(expired.body.error.message);
+  });
+
+  it("does not accept an email-verification OTP for password reset", async () => {
+    const reg = await registerViaApi();
+    const verifyMail = takeTestOtp(reg.body.user.email, "EMAIL_VERIFICATION")!;
+    await request(app)
+      .post("/api/public/auth/forgot-password")
+      .send({ email: reg.body.user.email });
+    const resetMail = takeTestOtp(reg.body.user.email, "PASSWORD_RESET")!;
+
+    const wrongPurpose = await request(app)
+      .post("/api/public/auth/reset-password/verify")
+      .send({ email: reg.body.user.email, code: verifyMail.code });
+    const rightPurpose = await request(app)
+      .post("/api/public/auth/reset-password/verify")
+      .send({ email: reg.body.user.email, code: resetMail.code });
+
+    expect(wrongPurpose.status).toBe(400);
+    expect(wrongPurpose.body.error.code).toBe("OTP_INVALID");
+    expect(rightPurpose.status).toBe(200);
   });
 });
 
@@ -1158,44 +1310,55 @@ describe("token cleanup (integration)", () => {
     expect(remaining).toBe(2);
   });
 
-  it("deletes expired and used verification tokens but keeps valid unused ones", async () => {
+  it("retains OTP audit rows for 90 days and then deletes only spent challenges", async () => {
     const { account } = await createAccount();
-    await prisma.accountVerificationToken.createMany({
+    const old = new Date(Date.now() - 91 * 86_400_000);
+    await prisma.otpChallenge.createMany({
       data: [
         {
-          token: `vrf_expired-${crypto.randomUUID().slice(0, 20)}`,
           accountId: account.id,
-          expiresAt: new Date(Date.now() - 1000),
+          purpose: "EMAIL_VERIFICATION",
+          destination: account.email,
+          codeHash: "a".repeat(64),
+          expiresAt: old,
+          createdAt: old,
         },
         {
-          token: `vrf_used-${crypto.randomUUID().slice(0, 20)}`,
           accountId: account.id,
+          purpose: "EMAIL_VERIFICATION",
+          destination: account.email,
+          codeHash: "b".repeat(64),
           expiresAt: new Date(Date.now() + 86_400_000),
-          usedAt: new Date(Date.now() - 1000),
+          createdAt: old,
+          usedAt: old,
         },
         {
-          token: `vrf_valid-${crypto.randomUUID().slice(0, 20)}`,
           accountId: account.id,
+          purpose: "EMAIL_VERIFICATION",
+          destination: account.email,
+          codeHash: "c".repeat(64),
           expiresAt: new Date(Date.now() + 86_400_000),
         },
       ],
     });
 
-    const result = await deleteExpiredVerificationTokens();
+    const result = await deleteExpiredOtpChallenges();
 
     expect(result.count).toBe(2);
-    const remaining = await prisma.accountVerificationToken.findMany();
+    const remaining = await prisma.otpChallenge.findMany();
     expect(remaining).toHaveLength(1);
-    expect(remaining[0]!.token).toMatch(/^vrf_valid-/);
+    expect(remaining[0]!.usedAt).toBeNull();
   });
 
   it("is safe to call twice in a row", async () => {
     const first = await deleteExpiredInviteTokens();
     const second = await deleteExpiredInviteTokens();
     const third = await deleteExpiredRefreshTokens();
+    const fourth = await deleteExpiredOtpChallenges();
     expect(first.count).toBeGreaterThanOrEqual(0);
     expect(second.count).toBe(0);
     expect(third.count).toBeGreaterThanOrEqual(0);
+    expect(fourth.count).toBeGreaterThanOrEqual(0);
   });
 });
 

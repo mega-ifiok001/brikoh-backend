@@ -4,6 +4,7 @@ import { env } from "./src/config/env.js";
 import { startAlertScheduler } from "./src/modules/notifications/service.js";
 import { startExpirySweep } from "./src/modules/orders/service.js";
 import { startSubscriptionSweeper } from "./src/modules/subscriptions/sweep.js";
+import { startAuthOtpCleanup } from "./src/modules/auth/service.js";
 
 const app = createApp();
 
@@ -19,6 +20,9 @@ startExpirySweep();
 // Subscription sweep: deferred downgrades, grace expiry, swap retries.
 // Same NODE_ENV=test no-op convention.
 startSubscriptionSweeper();
+
+// Retain consumed/invalidated OTP rows for 90 days, then clean them up.
+startAuthOtpCleanup();
 
 // The wired transactional-email channel (mirrors the sender factories in
 // the auth controller). Printed at boot so the deploy's email wiring is

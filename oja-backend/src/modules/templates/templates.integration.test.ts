@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import request from "supertest";
 import bcrypt from "bcrypt";
 import { app } from "../../../app.js";
+import { takeTestOtp } from "../auth/testOtpOutbox.js";
 import { createPrismaClient } from "../../lib/prisma.js";
 import { signAccessToken } from "../../lib/tokens.js";
 
@@ -399,11 +400,11 @@ describe("POST /api/dashboard/onboarding with templateId (integration)", () => {
   async function registerAndVerify() {
     const res = await request(app).post("/api/public/auth/register").send(VALID);
     expect(res.status).toBe(201);
-    const row = await prisma.accountVerificationToken.findFirst({
-      where: { accountId: res.body.user.accountId },
-      orderBy: { createdAt: "desc" },
-    });
-    const verify = await request(app).post("/api/public/auth/verify").send({ token: row!.token });
+    const message = takeTestOtp(res.body.user.email, "EMAIL_VERIFICATION");
+    expect(message).toBeDefined();
+    const verify = await request(app)
+      .post("/api/public/auth/verify")
+      .send({ email: res.body.user.email, code: message!.code });
     expect(verify.status).toBe(200);
     return res;
   }

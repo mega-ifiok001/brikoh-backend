@@ -146,6 +146,15 @@ export function createApp(): Express {
     }),
   );
 
+  // Simple public root endpoint for deployment/platform checks.
+  app.get("/", (_req, res) => {
+    res.status(200).json({
+      status: "ok",
+      message: "Brikoh API is running",
+      docs: "/api-docs",
+    });
+  });
+
   // --- public group -----------------------------------------------------
   // No auth. Only non-tenant-scoped, intentionally public endpoints.
   // Health gets a limiter too: it is the cheapest endpoint to hammer and

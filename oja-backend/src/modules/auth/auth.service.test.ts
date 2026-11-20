@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import bcrypt from "bcrypt";
+import { createHmac } from "node:crypto";
+import { env } from "../../config/env.js";
 import { formatRefreshToken } from "../../lib/tokens.js";
 import { AppError } from "../../lib/AppError.js";
 import { PERMISSIONS } from "../../lib/permissions.js";
@@ -17,8 +19,9 @@ import {
   changePassword,
   deleteAccount,
   deleteExpiredInviteTokens,
+  deleteExpiredOtpChallenges,
+  deleteExpiredPasswordResetGrants,
   deleteExpiredRefreshTokens,
-  deleteExpiredVerificationTokens,
   getMe,
   googleSignIn,
   login,
@@ -28,6 +31,7 @@ import {
   register,
   resendVerification,
   verifyEmail,
+  verifyPasswordResetOtp,
 } from "./service.js";
 import type { VerificationEmailData, VerificationEmailSender } from "./service.js";
 import type { GoogleOAuthClient, GoogleProfile } from "./google.js";
@@ -47,6 +51,7 @@ type Mock = ReturnType<typeof vi.fn>;
 
 interface PrismaStub {
   $transaction: Mock;
+  $queryRaw: Mock;
   account: { create: Mock; findUnique: Mock; update: Mock; delete: Mock };
   store: { create: Mock; update: Mock; delete: Mock };
   branch: { create: Mock };
@@ -54,18 +59,20 @@ interface PrismaStub {
   storeTemplate: { findMany: Mock };
   refreshToken: { create: Mock; findUnique: Mock; updateMany: Mock; deleteMany: Mock };
   inviteToken: { deleteMany: Mock };
-  accountVerificationToken: {
+  otpChallenge: {
     create: Mock;
-    findUnique: Mock;
     findFirst: Mock;
+    count: Mock;
     updateMany: Mock;
     deleteMany: Mock;
   };
+  passwordResetToken: { create: Mock; findUnique: Mock; updateMany: Mock; deleteMany: Mock };
 }
 
 function createStub(): PrismaStub {
   const stub: PrismaStub = {
     $transaction: vi.fn(),
+    $queryRaw: vi.fn().mockResolvedValue([{ id: "account-1" }]),
     account: { create: vi.fn(), findUnique: vi.fn(), update: vi.fn(), delete: vi.fn() },
     store: { create: vi.fn(), update: vi.fn(), delete: vi.fn() },
     branch: { create: vi.fn() },
@@ -78,10 +85,16 @@ function createStub(): PrismaStub {
       deleteMany: vi.fn(),
     },
     inviteToken: { deleteMany: vi.fn() },
-    accountVerificationToken: {
+    otpChallenge: {
+      create: vi.fn().mockResolvedValue({ id: "otp-1" }),
+      findFirst: vi.fn().mockResolvedValue(null),
+      count: vi.fn().mockResolvedValue(0),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      deleteMany: vi.fn(),
+    },
+    passwordResetToken: {
       create: vi.fn(),
       findUnique: vi.fn(),
-      findFirst: vi.fn(),
       updateMany: vi.fn(),
       deleteMany: vi.fn(),
     },
@@ -184,14 +197,14 @@ beforeEach(() => {
 });
 
 describe("register (unit)", () => {
-  it("creates an Account, issues a verification token, mails it, and returns tokens with needsOnboarding: true and verified: false", async () => {
+  it("creates an Account, stores only a hashed verification OTP, mails it, and returns a session", async () => {
     stub.account.create.mockResolvedValue(accountRow());
     stub.refreshToken.create.mockResolvedValue({ id: "token-1", accountId: "account-1" });
     const sender = fakeVerificationSender();
 
     const result = await register(VALID_REGISTER, sender);
 
-    expect(stub.$transaction).not.toHaveBeenCalled();
+    expect(stub.$transaction).toHaveBeenCalledOnce();
     expect(stub.store.create).not.toHaveBeenCalled();
     expect(stub.owner.create).not.toHaveBeenCalled();
     const created = stub.account.create.mock.calls[0]![0] as {
@@ -211,19 +224,23 @@ describe("register (unit)", () => {
     });
     expect(created.data.passwordHash).not.toBe(VALID_REGISTER.password);
     expect(await bcrypt.compare(VALID_REGISTER.password, created.data.passwordHash)).toBe(true);
-    const tokenCall = stub.accountVerificationToken.create.mock.calls[0]![0] as {
-      data: { token: string; accountId: string; expiresAt: Date };
+    const challengeCall = stub.otpChallenge.create.mock.calls[0]![0] as {
+      data: { codeHash: string; purpose: string; destination: string; accountId: string; expiresAt: Date };
     };
-    expect(tokenCall.data.accountId).toBe("account-1");
-    expect(tokenCall.data.token).toMatch(/^vrf_[A-Za-z0-9_-]+$/);
-    const ttl = tokenCall.data.expiresAt.getTime() - Date.now();
-    expect(ttl).toBeGreaterThan(23 * 60 * 60 * 1000);
-    expect(ttl).toBeLessThanOrEqual(24 * 60 * 60 * 1000);
+    expect(challengeCall.data.accountId).toBe("account-1");
+    expect(challengeCall.data.destination).toBe(VALID_REGISTER.email);
+    expect(challengeCall.data.purpose).toBe("EMAIL_VERIFICATION");
+    expect(challengeCall.data.codeHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(sender.sent[0]!.code).toMatch(/^\d{6}$/);
+    expect(challengeCall.data.codeHash).not.toBe(sender.sent[0]!.code);
+    const ttl = challengeCall.data.expiresAt.getTime() - Date.now();
+    expect(ttl).toBeGreaterThan(9 * 60 * 1000);
+    expect(ttl).toBeLessThanOrEqual(10 * 60 * 1000);
     expect(sender.sent).toHaveLength(1);
     expect(sender.sent[0]).toMatchObject({
       to: VALID_REGISTER.email,
-      token: tokenCall.data.token,
-      expiresAt: tokenCall.data.expiresAt,
+      code: sender.sent[0]!.code,
+      expiresAt: challengeCall.data.expiresAt,
     });
     expect(result.user).toEqual({
       accountId: "account-1",
@@ -253,7 +270,7 @@ describe("register (unit)", () => {
     const result = await register(VALID_REGISTER, sender);
 
     expect(result.accessToken).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
-    expect(stub.accountVerificationToken.create).toHaveBeenCalledOnce();
+    expect(stub.otpChallenge.create).toHaveBeenCalledOnce();
   });
 
   it("rejects a duplicate email with EMAIL_TAKEN (409) and sends nothing", async () => {
@@ -264,7 +281,7 @@ describe("register (unit)", () => {
       code: "EMAIL_TAKEN",
       statusCode: 409,
     });
-    expect(stub.accountVerificationToken.create).not.toHaveBeenCalled();
+    expect(stub.otpChallenge.create).not.toHaveBeenCalled();
     expect(sender.sent).toHaveLength(0);
   });
 
@@ -301,38 +318,63 @@ describe("register (unit)", () => {
       code: "VALIDATION_ERROR",
     });
     expect(stub.account.create).not.toHaveBeenCalled();
-    expect(stub.accountVerificationToken.create).not.toHaveBeenCalled();
+    expect(stub.otpChallenge.create).not.toHaveBeenCalled();
     expect(sender.sent).toHaveLength(0);
   });
 });
 
 describe("verifyEmail (unit)", () => {
-  const TOKEN = "vrf_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO123456";
-  const FUTURE = new Date(Date.now() + 60 * 60 * 1000);
+  const EMAIL = "owner@example.com";
+  const CODE = "042817";
+  const FUTURE = new Date(Date.now() + 10 * 60 * 1000);
 
-  function tokenRow(overrides: Record<string, unknown> = {}) {
+  function challengeRow(overrides: Record<string, unknown> = {}) {
+    const codeHash = createHmac("sha256", env.OTP_HMAC_SECRET)
+      .update(`EMAIL_VERIFICATION\0account-1\0${EMAIL}\0${CODE}`)
+      .digest("hex");
     return {
-      id: "vrf-token-1",
-      token: TOKEN,
+      id: "otp-1",
       accountId: "account-1",
+      purpose: "EMAIL_VERIFICATION",
+      destination: EMAIL,
+      codeHash,
+      attempts: 0,
       expiresAt: FUTURE,
       usedAt: null,
-      createdAt: new Date(Date.now() - 60 * 1000),
+      invalidatedAt: null,
+      createdAt: new Date(),
       ...overrides,
     };
   }
 
-  it("consumes the token and marks the account verified", async () => {
-    stub.accountVerificationToken.findUnique.mockResolvedValue(tokenRow());
-    stub.account.findUnique.mockResolvedValue(accountRow({ emailVerifiedAt: null }));
-    stub.accountVerificationToken.updateMany.mockResolvedValue({ count: 1 });
+  it("consumes the OTP and marks the account verified in one transaction", async () => {
+    stub.account.findUnique.mockResolvedValue({ id: "account-1" });
+    stub.otpChallenge.findFirst.mockResolvedValue(challengeRow());
+    stub.otpChallenge.updateMany.mockResolvedValue({ count: 1 });
     stub.account.update.mockResolvedValue(accountRow());
 
-    const result = await verifyEmail(TOKEN);
+    const result = await verifyEmail({ email: EMAIL, code: CODE });
 
     expect(result).toEqual({ verified: true });
-    expect(stub.accountVerificationToken.updateMany).toHaveBeenCalledWith({
-      where: { id: "vrf-token-1", usedAt: null },
+    expect(stub.$transaction).toHaveBeenCalledOnce();
+    expect(stub.otpChallenge.findFirst).toHaveBeenCalledWith({
+      where: {
+        accountId: "account-1",
+        purpose: "EMAIL_VERIFICATION",
+        destination: EMAIL,
+        usedAt: null,
+        invalidatedAt: null,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(stub.otpChallenge.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "otp-1",
+        attempts: { lt: expect.any(Number) },
+        usedAt: null,
+        invalidatedAt: null,
+        expiresAt: { gt: expect.any(Date) },
+      },
       data: { usedAt: expect.any(Date) },
     });
     expect(stub.account.update).toHaveBeenCalledWith({
@@ -341,158 +383,129 @@ describe("verifyEmail (unit)", () => {
     });
   });
 
-  it("resolves success for an already-verified account without consuming the token again", async () => {
-    stub.accountVerificationToken.findUnique.mockResolvedValue(tokenRow());
-    stub.account.findUnique.mockResolvedValue(accountRow());
+  it("increments incorrect attempts and invalidates at the fifth attempt", async () => {
+    stub.account.findUnique.mockResolvedValue({ id: "account-1" });
+    stub.otpChallenge.findFirst.mockResolvedValue(challengeRow({ attempts: 4 }));
+    stub.otpChallenge.updateMany.mockResolvedValue({ count: 1 });
 
-    const result = await verifyEmail(TOKEN);
-
-    expect(result).toEqual({ verified: true });
-    expect(stub.accountVerificationToken.updateMany).not.toHaveBeenCalled();
-    expect(stub.account.update).not.toHaveBeenCalled();
+    await expect(verifyEmail({ email: EMAIL, code: "111111" })).rejects.toMatchObject({
+      code: "OTP_INVALID",
+    });
+    const update = stub.otpChallenge.updateMany.mock.calls.at(-1)![0] as {
+      data: { attempts: number; invalidatedAt: Date };
+    };
+    expect(update.data.attempts).toBe(5);
+    expect(update.data.invalidatedAt).toBeInstanceOf(Date);
   });
 
-  it("resolves success when a concurrent click wins the consumption race", async () => {
-    stub.accountVerificationToken.findUnique.mockResolvedValue(tokenRow());
-    stub.account.findUnique.mockResolvedValue(accountRow({ emailVerifiedAt: null }));
-    stub.accountVerificationToken.updateMany.mockResolvedValue({ count: 0 });
+  it("rejects an expired or missing challenge with the same generic error", async () => {
+    stub.account.findUnique.mockResolvedValue({ id: "account-1" });
+    stub.otpChallenge.findFirst.mockResolvedValue(
+      challengeRow({ expiresAt: new Date(Date.now() - 1000) }),
+    );
+    await expect(verifyEmail({ email: EMAIL, code: CODE })).rejects.toMatchObject({
+      code: "OTP_INVALID",
+      statusCode: 400,
+    });
 
-    const result = await verifyEmail(TOKEN);
-
-    expect(result).toEqual({ verified: true });
-    expect(stub.account.update).not.toHaveBeenCalled();
-  });
-
-  it("rejects an unknown token with VERIFICATION_INVALID (404)", async () => {
-    stub.accountVerificationToken.findUnique.mockResolvedValue(null);
-
-    await expect(verifyEmail(TOKEN)).rejects.toMatchObject({
-      code: "VERIFICATION_INVALID",
-      statusCode: 404,
+    stub.otpChallenge.findFirst.mockResolvedValue(null);
+    await expect(verifyEmail({ email: EMAIL, code: CODE })).rejects.toMatchObject({
+      code: "OTP_INVALID",
+      statusCode: 400,
     });
   });
 
-  it("rejects an already-used token", async () => {
-    stub.accountVerificationToken.findUnique.mockResolvedValue(tokenRow({ usedAt: new Date() }));
-    stub.account.findUnique.mockResolvedValue(accountRow({ emailVerifiedAt: null }));
-
-    await expect(verifyEmail(TOKEN)).rejects.toMatchObject({ code: "VERIFICATION_INVALID" });
-  });
-
-  it("rejects an expired token", async () => {
-    stub.accountVerificationToken.findUnique.mockResolvedValue(
-      tokenRow({ expiresAt: new Date(Date.now() - 1000) }),
-    );
-    stub.account.findUnique.mockResolvedValue(accountRow({ emailVerifiedAt: null }));
-
-    await expect(verifyEmail(TOKEN)).rejects.toMatchObject({ code: "VERIFICATION_INVALID" });
-  });
-
-  it("rejects a token for a deleted account", async () => {
-    stub.accountVerificationToken.findUnique.mockResolvedValue(tokenRow());
+  it("does not reveal whether an email has an account", async () => {
     stub.account.findUnique.mockResolvedValue(null);
-
-    await expect(verifyEmail(TOKEN)).rejects.toMatchObject({ code: "VERIFICATION_INVALID" });
+    await expect(verifyEmail({ email: "nobody@example.com", code: CODE })).rejects.toMatchObject({
+      code: "OTP_INVALID",
+      statusCode: 400,
+    });
   });
 
-  it("validates the token shape before touching the database (400 VALIDATION_ERROR)", async () => {
-    await expect(verifyEmail("")).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
-    await expect(verifyEmail("not-vrf-prefixed")).rejects.toMatchObject({
+  it("validates email and six-digit code before database access", async () => {
+    await expect(verifyEmail({ email: EMAIL, code: "12" })).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      statusCode: 400,
+    });
+    await expect(verifyEmail({ email: "bad-email", code: CODE })).rejects.toMatchObject({
       code: "VALIDATION_ERROR",
     });
-    await expect(verifyEmail(undefined)).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
-    expect(stub.accountVerificationToken.findUnique).not.toHaveBeenCalled();
+    expect(stub.account.findUnique).not.toHaveBeenCalled();
   });
 });
 
 describe("resendVerification (unit)", () => {
-  it("rotates the pending token, mails the new one, and resolves sent: true", async () => {
+  it("issues, stores only a purpose-bound HMAC, and sends a fresh code", async () => {
     stub.account.findUnique.mockResolvedValue(accountRow({ emailVerifiedAt: null }));
-    stub.accountVerificationToken.findFirst.mockResolvedValue({
-      id: "old-token",
-      createdAt: new Date(Date.now() - 5 * 60 * 1000),
-    });
-    stub.accountVerificationToken.deleteMany.mockResolvedValue({ count: 1 });
     const sender = fakeVerificationSender();
 
     const result = await resendVerification("account-1", sender);
 
     expect(result).toEqual({ sent: true });
-    expect(stub.accountVerificationToken.deleteMany).toHaveBeenCalledWith({
-      where: { accountId: "account-1", usedAt: null, expiresAt: { gt: expect.any(Date) } },
-    });
-    const tokenCall = stub.accountVerificationToken.create.mock.calls[0]![0] as {
-      data: { token: string; accountId: string; expiresAt: Date };
+    const create = stub.otpChallenge.create.mock.calls[0]![0] as {
+      data: { purpose: string; destination: string; codeHash: string; accountId: string; expiresAt: Date };
     };
-    expect(tokenCall.data.accountId).toBe("account-1");
-    expect(tokenCall.data.token).toMatch(/^vrf_/);
+    expect(create.data).toMatchObject({
+      accountId: "account-1",
+      purpose: "EMAIL_VERIFICATION",
+      destination: VALID_REGISTER.email,
+    });
+    expect(create.data.codeHash).toMatch(/^[a-f0-9]{64}$/);
     expect(sender.sent).toHaveLength(1);
-    expect(sender.sent[0]!.token).toBe(tokenCall.data.token);
+    expect(sender.sent[0]!.code).toMatch(/^\d{6}$/);
+    expect(create.data.codeHash).not.toBe(sender.sent[0]!.code);
+    expect(create.data.expiresAt.getTime() - Date.now()).toBeLessThanOrEqual(10 * 60 * 1000);
   });
 
-  it("rejects an already-verified account with ALREADY_VERIFIED (409)", async () => {
+  it("rejects an already-verified account", async () => {
     stub.account.findUnique.mockResolvedValue(accountRow());
-
     await expect(resendVerification("account-1", fakeVerificationSender())).rejects.toMatchObject({
       code: "ALREADY_VERIFIED",
       statusCode: 409,
     });
-    expect(stub.accountVerificationToken.create).not.toHaveBeenCalled();
+    expect(stub.otpChallenge.create).not.toHaveBeenCalled();
   });
 
-  it("rate-limits resends to one per 60 seconds (429)", async () => {
+  it("enforces the 60-second resend cooldown", async () => {
     stub.account.findUnique.mockResolvedValue(accountRow({ emailVerifiedAt: null }));
-    stub.accountVerificationToken.findFirst.mockResolvedValue({
-      id: "fresh-token",
-      createdAt: new Date(Date.now() - 10 * 1000),
+    stub.otpChallenge.findFirst.mockResolvedValue({
+      id: "recent",
+      createdAt: new Date(Date.now() - 10_000),
     });
-
     await expect(resendVerification("account-1", fakeVerificationSender())).rejects.toMatchObject({
       code: "RATE_LIMITED",
       statusCode: 429,
     });
-    expect(stub.accountVerificationToken.create).not.toHaveBeenCalled();
+    expect(stub.otpChallenge.create).not.toHaveBeenCalled();
   });
 
-  it("sends immediately when no token has been issued before", async () => {
+  it("limits requests in the configured account window", async () => {
     stub.account.findUnique.mockResolvedValue(accountRow({ emailVerifiedAt: null }));
-    stub.accountVerificationToken.findFirst.mockResolvedValue(null);
-    stub.accountVerificationToken.deleteMany.mockResolvedValue({ count: 0 });
-    const sender = fakeVerificationSender();
-
-    const result = await resendVerification("account-1", sender);
-
-    expect(result).toEqual({ sent: true });
-    // Rotation is a no-op without a prior pending token, never a failure.
-    expect(stub.accountVerificationToken.deleteMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { accountId: "account-1", usedAt: null, expiresAt: { gt: expect.any(Date) } },
-      }),
-    );
-    expect(sender.sent).toHaveLength(1);
-  });
-
-  it("rejects an unknown account with ACCOUNT_NOT_FOUND (404)", async () => {
-    stub.account.findUnique.mockResolvedValue(null);
-
+    stub.otpChallenge.findFirst.mockResolvedValue({
+      id: "old",
+      createdAt: new Date(Date.now() - 2 * 60_000),
+    });
+    stub.otpChallenge.count.mockResolvedValue(5);
     await expect(resendVerification("account-1", fakeVerificationSender())).rejects.toMatchObject({
-      code: "ACCOUNT_NOT_FOUND",
-      statusCode: 404,
+      code: "RATE_LIMITED",
+      statusCode: 429,
     });
   });
 
-  it("resolves even when the email cannot be delivered", async () => {
+  it("invalidates the code if mail delivery fails", async () => {
     stub.account.findUnique.mockResolvedValue(accountRow({ emailVerifiedAt: null }));
-    stub.accountVerificationToken.findFirst.mockResolvedValue(null);
     const sender = fakeVerificationSender();
     sender.sendVerificationEmail = async () => {
-      throw new Error("resend 500 server error");
+      throw new Error("provider failure");
     };
-
     await expect(resendVerification("account-1", sender)).resolves.toEqual({ sent: true });
+    expect(stub.otpChallenge.updateMany).toHaveBeenCalledWith({
+      where: { id: "otp-1", usedAt: null, invalidatedAt: null },
+      data: { invalidatedAt: expect.any(Date) },
+    });
   });
 });
-
 describe("onboardAccount (unit)", () => {
   const PROFILE = {
     name: "Ades Store",
@@ -1381,28 +1394,43 @@ describe("token cleanup (unit)", () => {
     expect(cutoff.getTime()).toBeCloseTo(Date.now() - 7 * 86_400_000, -5);
   });
 
-  it("deletes expired and used verification tokens", async () => {
-    stub.accountVerificationToken.deleteMany.mockResolvedValue({ count: 2 });
+  it("cleans spent OTP rows after the audit retention window", async () => {
+    stub.otpChallenge.deleteMany.mockResolvedValue({ count: 2 });
 
-    const result = await deleteExpiredVerificationTokens();
+    const result = await deleteExpiredOtpChallenges();
 
     expect(result).toEqual({ count: 2 });
-    const where = stub.accountVerificationToken.deleteMany.mock.calls[0]![0] as unknown as {
-      where: { OR: [{ expiresAt: { lt: Date } }, { usedAt: { not: null } }] };
+    const where = stub.otpChallenge.deleteMany.mock.calls[0]![0] as unknown as {
+      where: { createdAt: { lt: Date }; OR: Array<Record<string, unknown>> };
+    };
+    expect(where.where.createdAt.lt.getTime()).toBeCloseTo(Date.now() - 90 * 86_400_000, -5);
+    expect(where.where.OR).toHaveLength(3);
+    expect(where.where.OR[0]).toEqual({ expiresAt: { lt: expect.any(Date) } });
+    expect(where.where.OR[1]).toEqual({ usedAt: { not: null } });
+    expect(where.where.OR[2]).toEqual({ invalidatedAt: { not: null } });
+  });
+
+  it("cleans expired and retained used reset grants", async () => {
+    stub.passwordResetToken.deleteMany.mockResolvedValue({ count: 3 });
+    await expect(deleteExpiredPasswordResetGrants()).resolves.toEqual({ count: 3 });
+    const where = stub.passwordResetToken.deleteMany.mock.calls[0]![0] as unknown as {
+      where: { OR: Array<Record<string, unknown>> };
     };
     expect(where.where.OR).toHaveLength(2);
-    expect(where.where.OR[0]!.expiresAt.lt).toBeInstanceOf(Date);
-    expect(where.where.OR[1]!.usedAt).toEqual({ not: null });
+    expect(where.where.OR[0]).toEqual({ expiresAt: { lt: expect.any(Date) } });
+    expect(where.where.OR[1]).toEqual({ usedAt: { lt: expect.any(Date) } });
   });
 
   it("is safe to call repeatedly with nothing to delete", async () => {
     stub.inviteToken.deleteMany.mockResolvedValue({ count: 0 });
     stub.refreshToken.deleteMany.mockResolvedValue({ count: 0 });
-    stub.accountVerificationToken.deleteMany.mockResolvedValue({ count: 0 });
+    stub.otpChallenge.deleteMany.mockResolvedValue({ count: 0 });
+    stub.passwordResetToken.deleteMany.mockResolvedValue({ count: 0 });
 
     await expect(deleteExpiredInviteTokens()).resolves.toEqual({ count: 0 });
     await expect(deleteExpiredRefreshTokens()).resolves.toEqual({ count: 0 });
-    await expect(deleteExpiredVerificationTokens()).resolves.toEqual({ count: 0 });
+    await expect(deleteExpiredOtpChallenges()).resolves.toEqual({ count: 0 });
+    await expect(deleteExpiredPasswordResetGrants()).resolves.toEqual({ count: 0 });
   });
 });
 

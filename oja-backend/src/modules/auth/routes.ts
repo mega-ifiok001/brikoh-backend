@@ -14,24 +14,30 @@ import {
   resendVerificationHandler,
   resetPasswordHandler,
   verifyHandler,
+  verifyPasswordResetOtpHandler,
 } from "./controller.js";
 
 const authRouter: Router = Router();
 
-authRouter.post("/register", registerHandler);
+authRouter.post("/register", rateLimit({ windowMs: 60_000, max: 10 }), registerHandler);
 authRouter.post("/login", loginHandler);
 authRouter.post("/google", googleSignInHandler);
 authRouter.post("/refresh", refreshHandler);
 authRouter.post("/logout", logoutHandler);
-// The verification token IS the credential (single-use, mailed), so the
-// verify endpoint lives in the public auth group like accept-invite.
-authRouter.post("/verify", verifyHandler);
+// Email/code pairs are the credential; the short-lived OTP is purpose-bound
+// to the email and account, and verified once.
+authRouter.post("/verify", rateLimit({ windowMs: 60_000, max: 10 }), verifyHandler);
 authRouter.post(
   "/forgot-password",
   rateLimit({ windowMs: 60_000, max: 10 }),
   forgotPasswordHandler,
 );
 authRouter.post("/reset-password", rateLimit({ windowMs: 60_000, max: 10 }), resetPasswordHandler);
+authRouter.post(
+  "/reset-password/verify",
+  rateLimit({ windowMs: 60_000, max: 10 }),
+  verifyPasswordResetOtpHandler,
+);
 
 const dashboardMeRouter: Router = Router();
 dashboardMeRouter.get("/", meHandler);
@@ -51,7 +57,11 @@ onboardingRouter.post("/", onboardingHandler);
 // Account-level (authenticate only, like /me): resending verification
 // needs the session but no tenant context.
 const resendVerificationRouter: Router = Router();
-resendVerificationRouter.post("/", resendVerificationHandler);
+resendVerificationRouter.post(
+  "/",
+  rateLimit({ windowMs: 15 * 60_000, max: 5 }),
+  resendVerificationHandler,
+);
 
 export {
   authRouter,

@@ -9,6 +9,7 @@ import type {
   VerificationEmailData,
   VerificationEmailSender,
 } from "./service.js";
+import { recordTestOtp } from "./testOtpOutbox.js";
 
 export { createResendClient, type ResendEmailClient } from "../../lib/email/resend.js";
 
@@ -19,11 +20,7 @@ export interface BuiltVerificationEmail {
 }
 
 /** Builds the HTTPS URL that web and native apps register for email verification. */
-export function buildVerificationLink(token: string): string {
-  const link = new URL("/verify-email", env.FRONTEND_URL);
-  link.searchParams.set("token", token);
-  return link.toString();
-}
+// Verification now uses an in-app OTP, not an email link.
 
 /**
  * Builds the HTML + text verification email. The expiry is rendered
@@ -32,7 +29,6 @@ export function buildVerificationLink(token: string): string {
  * travels in the href, and generated tokens are URL-safe base64url.
  */
 export function buildVerificationEmail(data: VerificationEmailData): BuiltVerificationEmail {
-  const verifyLink = buildVerificationLink(data.token);
   const expiry = formatHumanDate(data.expiresAt);
 
   const subject = `Verify your email on ${APP_NAME}`;
@@ -40,11 +36,11 @@ export function buildVerificationEmail(data: VerificationEmailData): BuiltVerifi
   const text = [
     `Welcome to ${APP_NAME} — one more step to go.`,
     "",
-    "Verify your email address to finish setting up your store:",
+    "Enter this code in the Brikoh app to verify your email address:",
     "",
-    `Verify my email: ${verifyLink}`,
+    data.code,
     "",
-    `This link expires on ${expiry}.`,
+    `This code expires on ${expiry} and can only be used once.`,
     "",
     `If you didn't create an account on ${APP_NAME}, you can ignore this email.`,
   ].join("\n");
@@ -52,11 +48,11 @@ export function buildVerificationEmail(data: VerificationEmailData): BuiltVerifi
   const html = renderEmailLayout({
     title: `Verify your email on ${APP_NAME}`,
     body: [
-      `<p style="margin:0 0 24px;color:#52525b;">Welcome to ${APP_NAME}. Verify your email address to finish setting up your store.</p>`,
+      `<p style="margin:0 0 16px;color:#52525b;">Welcome to ${APP_NAME}. Enter this code in the app to verify your email address:</p>`,
+      `<p style="margin:0 0 24px;text-align:center;font-size:32px;font-weight:700;letter-spacing:8px;color:#18181b;">${data.code}</p>`,
     ],
-    cta: { label: "Verify my email", href: verifyLink },
     footer: [
-      `This link expires on ${expiry}.`,
+      `This code expires on ${expiry} and can only be used once.`,
       `If you didn't create an account on ${APP_NAME}, you can ignore this email.`,
     ],
   });
@@ -75,13 +71,10 @@ export class ResendVerificationSender implements VerificationEmailSender {
   }
 }
 
-/** Development stub: prints the verify link instead of sending it. */
+/** Test-only sink; captures OTPs in memory and never logs them. */
 export class ConsoleVerificationSender implements VerificationEmailSender {
   async sendVerificationEmail(data: VerificationEmailData): Promise<void> {
-    const email = buildVerificationEmail(data);
-    console.log(
-      `[verify-email:stub] to ${data.to} — subject "${email.subject}" — link: ${buildVerificationLink(data.token)} (expires ${formatHumanDate(data.expiresAt)})`,
-    );
+    recordTestOtp(data.to, { purpose: "EMAIL_VERIFICATION", code: data.code, expiresAt: data.expiresAt });
   }
 }
 
@@ -92,23 +85,24 @@ export interface BuiltPasswordResetEmail {
 }
 
 export function buildPasswordResetEmail(data: PasswordResetEmailData): BuiltPasswordResetEmail {
-  const resetLink = `${env.FRONTEND_URL}/#/reset-password?token=${encodeURIComponent(data.token)}`;
   const expiry = formatHumanDate(data.expiresAt);
   const subject = `Reset your ${APP_NAME} password`;
   const text = [
     `We received a request to reset your ${APP_NAME} password.`,
     "",
-    `Reset your password: ${resetLink}`,
+    "Enter this code in the Brikoh app to continue resetting your password:",
     "",
-    `This link expires on ${expiry} and can only be used once.`,
+    data.code,
+    "",
+    `This code expires on ${expiry} and can only be used once.`,
     "If you didn't request this reset, you can ignore this email.",
   ].join("\n");
   const html = renderEmailLayout({
     title: `Reset your ${APP_NAME} password`,
     body: [
-      `<p style="margin:0 0 24px;color:#52525b;">We received a request to reset your password. Use the link below to choose a new one.</p>`,
+      `<p style="margin:0 0 16px;color:#52525b;">We received a request to reset your password. Enter this code in the Brikoh app:</p>`,
+      `<p style="margin:0 0 24px;text-align:center;font-size:32px;font-weight:700;letter-spacing:8px;color:#18181b;">${data.code}</p>`,
     ],
-    cta: { label: "Reset password", href: resetLink },
     footer: [
       `This link expires on ${expiry} and can only be used once.`,
       `If you didn't request this reset, you can ignore this email.`,
@@ -128,13 +122,10 @@ export class ResendPasswordResetSender implements PasswordResetEmailSender {
   }
 }
 
-/** Test-only sender that exposes the link in test output, never in production. */
+/** Test-only sink; captures OTPs in memory and never logs them. */
 export class ConsolePasswordResetSender implements PasswordResetEmailSender {
   async sendPasswordResetEmail(data: PasswordResetEmailData): Promise<void> {
-    const email = buildPasswordResetEmail(data);
-    console.log(
-      `[password-reset:stub] to ${data.to} — subject "${email.subject}" — link: ${env.FRONTEND_URL}/#/reset-password?token=${data.token} (expires ${formatHumanDate(data.expiresAt)})`,
-    );
+    recordTestOtp(data.to, { purpose: "PASSWORD_RESET", code: data.code, expiresAt: data.expiresAt });
   }
 }
 

@@ -88,21 +88,23 @@ export type LoginInput = z.infer<typeof loginSchema>;
 export const refreshTokenSchema = z.string().min(1, "Refresh token is required");
 export type RefreshTokenInput = z.infer<typeof refreshTokenSchema>;
 
-export const verificationTokenSchema = z
-  .string()
-  .min(1, "token is required")
-  .max(256, "token is too long")
-  .startsWith("vrf_", "token must start with vrf_");
+const otpCodeSchema = z.string().regex(/^\d{6}$/, "code must be exactly 6 digits");
+
+export const verifyEmailSchema = z.object({ email: emailSchema, code: otpCodeSchema });
+export type VerifyEmailInput = z.infer<typeof verifyEmailSchema>;
 
 export const forgotPasswordSchema = z.object({ email: emailSchema });
 
+export const verifyPasswordResetOtpSchema = z.object({ email: emailSchema, code: otpCodeSchema });
+export type VerifyPasswordResetOtpInput = z.infer<typeof verifyPasswordResetOtpSchema>;
+
 export const resetPasswordSchema = z
   .object({
-    token: z
+    resetToken: z
       .string()
-      .min(1, "token is required")
-      .max(128, "token is too long")
-      .startsWith("rst_", "token is invalid"),
+      .min(1, "resetToken is required")
+      .max(128, "resetToken is too long")
+      .startsWith("rst_", "resetToken is invalid"),
     newPassword: passwordSchema,
     confirmPassword: z.string().min(1, "Please confirm your password"),
   })
@@ -110,8 +112,6 @@ export const resetPasswordSchema = z
     path: ["confirmPassword"],
     message: "passwords do not match",
   });
-export type VerificationTokenInput = z.infer<typeof verificationTokenSchema>;
-
 export const googleSignInSchema = z.object({
   // The authorization code Google redirects to the frontend callback
   // with. Single-use; the backend exchanges it for the identity.

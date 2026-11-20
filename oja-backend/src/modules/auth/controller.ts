@@ -28,6 +28,7 @@ import {
   resendVerification,
   resetPassword,
   verifyEmail,
+  verifyPasswordResetOtp,
 } from "./service.js";
 import type {
   PasswordResetEmailSender,
@@ -157,7 +158,7 @@ export async function verifyHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const result = await verifyEmail(req.body?.token);
+    const result = await verifyEmail(req.body);
     res.status(200).json(result);
   } catch (err) {
     next(err);
@@ -173,8 +174,22 @@ export async function forgotPasswordHandler(
   try {
     await requestPasswordReset(req.body, defaultPasswordResetSender());
     res.status(202).json({
-      message: "If an account exists for that email, password reset instructions will be sent.",
+      message: "If an account exists for that email, a password reset code will be sent.",
     });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** POST /api/public/auth/reset-password/verify */
+export async function verifyPasswordResetOtpHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const result = await verifyPasswordResetOtp(req.body);
+    res.status(200).json(result);
   } catch (err) {
     next(err);
   }

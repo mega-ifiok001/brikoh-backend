@@ -31,6 +31,15 @@ const envSchema = z.object({
   JWT_REFRESH_SECRET: z.string().min(32, "JWT_REFRESH_SECRET must be at least 32 characters"),
   JWT_ACCESS_EXPIRES_IN: durationSchema,
   JWT_REFRESH_EXPIRES_IN: durationSchema,
+  // Dedicated HMAC key for purpose/account/destination-bound email OTPs.
+  // Keep this separate from all JWT and payment-encryption keys.
+  OTP_HMAC_SECRET: z.string().min(32, "OTP_HMAC_SECRET must be at least 32 characters"),
+  OTP_TTL_MINUTES: z.coerce.number().int().min(5).max(10).default(10),
+  OTP_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(5).default(5),
+  OTP_RESEND_COOLDOWN_SECONDS: z.coerce.number().int().min(60).max(3600).default(60),
+  OTP_MAX_REQUESTS_PER_WINDOW: z.coerce.number().int().min(1).max(5).default(5),
+  OTP_REQUEST_WINDOW_MINUTES: z.coerce.number().int().min(15).max(60).default(15),
+  OTP_CLEANUP_INTERVAL_MS: durationSchema.default("24h").transform(durationToMs),
   // Platform-staff (admin) JWT — a SEPARATE secret and lifetime from the
   // merchant JWT. Admin tokens are only issued by the admin login endpoint
   // after a verified TOTP code, and never share claims with store tokens.

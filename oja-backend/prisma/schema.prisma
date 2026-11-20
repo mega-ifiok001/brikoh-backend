@@ -53,6 +53,12 @@ enum InviteTokenStatus {
   EXPIRED
 }
 
+enum OtpPurpose {
+  EMAIL_VERIFICATION
+  PASSWORD_RESET
+  TRANSACTION_CONFIRMATION
+}
+
 enum InvoiceStatus {
   DRAFT
   ISSUED
@@ -288,32 +294,36 @@ model Account {
   owner                Owner?
   staffMembers         StaffMember[]
   refreshTokens        RefreshToken[]
-  verificationTokens   AccountVerificationToken[]
+  otpChallenges       OtpChallenge[]
   passwordResetTokens  PasswordResetToken[]
   supportTicketsRaised SupportTicket[]            @relation("TicketRaisedBy")
   ticketMessages       TicketMessage[]            @relation("TicketMessageAccountAuthor")
 }
 
-// Single-use email-verification tokens. Raw token values (like invite
-// tokens) are stored and matched exactly; consumption is a usedAt
-// timestamp guarded by an updateMany race so two concurrent link clicks
-// verify exactly once. Expired and used rows are removed by the token
-// cleanup service function.
-model AccountVerificationToken {
-  id        String    @id @default(uuid(7)) @db.Uuid
-  token     String    @unique
-  accountId String    @db.Uuid
-  account   Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  expiresAt DateTime  @db.Timestamptz(3)
-  usedAt    DateTime? @db.Timestamptz(3)
-  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+// Purpose-bound email OTP challenges. Only an HMAC digest of the 6-digit code
+// is stored; attempted, consumed, and invalidated rows are retained briefly
+// for throttling/audit and removed by the auth-token cleanup sweep.
+model OtpChallenge {
+  id            String     @id @default(uuid(7)) @db.Uuid
+  accountId     String     @db.Uuid
+  account       Account    @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  purpose       OtpPurpose
+  destination   String
+  codeHash      String     @db.VarChar(64)
+  attempts      Int        @default(0)
+  expiresAt     DateTime   @db.Timestamptz(3)
+  usedAt        DateTime?  @db.Timestamptz(3)
+  invalidatedAt DateTime?  @db.Timestamptz(3)
+  createdAt     DateTime   @default(now()) @db.Timestamptz(3)
 
-  @@index([accountId])
+  @@index([accountId, purpose, destination, createdAt])
+  @@index([destination, purpose, createdAt])
+  @@index([expiresAt])
 }
 
-// Password reset credentials are stored as SHA-256 hashes, never in raw form.
-// The raw token is high entropy and emailed once; usedAt is guarded in a
-// transaction with the password change so concurrent submissions cannot win.
+// Short-lived reset grants are issued only after a PASSWORD_RESET OTP is
+// verified. Their random bearer values are SHA-256 hashed at rest and consumed
+// atomically with the password update and session revocation.
 model PasswordResetToken {
   id        String    @id @default(uuid(7)) @db.Uuid
   tokenHash String    @unique @db.VarChar(64)

@@ -10,6 +10,8 @@ const baseEnv = {
   JWT_REFRESH_SECRET: "another-very-long-secret-value-for-tests-123",
   JWT_ACCESS_EXPIRES_IN: "15m",
   JWT_REFRESH_EXPIRES_IN: "7d",
+  OTP_HMAC_SECRET: "unit-test-otp-hmac-secret-at-least-32-characters",
+  OTP_TTL_MINUTES: "10",
   ADMIN_JWT_SECRET: "an-admin-long-secret-value-for-tests-12345",
   ADMIN_JWT_ACCESS_EXPIRES_IN: "15m",
   CLOUDINARY_CLOUD_NAME: "test-cloud",
@@ -37,6 +39,7 @@ describe("loadEnv", () => {
     expect(env.NODE_ENV).toBe("test");
     expect(env.PORT).toBe(4000);
     expect(env.DATABASE_URL).toBe(baseEnv.DATABASE_URL);
+    expect(env.OTP_TTL_MINUTES).toBe(10);
   });
 
   it("throws when a required variable is missing", () => {
@@ -49,6 +52,16 @@ describe("loadEnv", () => {
 
   it("throws when a variable is malformed", () => {
     expect(() => loadEnv({ ...baseEnv, PORT: "not-a-port" })).toThrow(
+      /Invalid environment configuration/,
+    );
+  });
+
+  it("requires a strong OTP HMAC key and constrains the OTP lifetime", () => {
+    expect(() => loadEnv({ ...baseEnv, OTP_HMAC_SECRET: "short" })).toThrow(/OTP_HMAC_SECRET/);
+    expect(() => loadEnv({ ...baseEnv, OTP_TTL_MINUTES: "4" })).toThrow(
+      /Invalid environment configuration/,
+    );
+    expect(() => loadEnv({ ...baseEnv, OTP_TTL_MINUTES: "11" })).toThrow(
       /Invalid environment configuration/,
     );
   });
