@@ -1,7 +1,9 @@
 import { Router } from "express";
+import { rateLimit } from "../../middleware/rateLimit.js";
 import {
   changePasswordHandler,
   deleteAccountHandler,
+  forgotPasswordHandler,
   googleSignInHandler,
   loginHandler,
   logoutHandler,
@@ -10,6 +12,7 @@ import {
   refreshHandler,
   registerHandler,
   resendVerificationHandler,
+  resetPasswordHandler,
   verifyHandler,
 } from "./controller.js";
 
@@ -23,6 +26,12 @@ authRouter.post("/logout", logoutHandler);
 // The verification token IS the credential (single-use, mailed), so the
 // verify endpoint lives in the public auth group like accept-invite.
 authRouter.post("/verify", verifyHandler);
+authRouter.post(
+  "/forgot-password",
+  rateLimit({ windowMs: 60_000, max: 10 }),
+  forgotPasswordHandler,
+);
+authRouter.post("/reset-password", rateLimit({ windowMs: 60_000, max: 10 }), resetPasswordHandler);
 
 const dashboardMeRouter: Router = Router();
 dashboardMeRouter.get("/", meHandler);

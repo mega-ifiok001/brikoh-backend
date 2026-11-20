@@ -1,5 +1,5 @@
 import bcrypt from "bcrypt";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { $Enums } from "../../../generated/prisma/client.js";
 import type { AccountGetPayload } from "../../../generated/prisma/models/Account.js";
 import { AppError } from "../../lib/AppError.js";
@@ -18,11 +18,13 @@ import {
 } from "../../lib/tokens.js";
 import {
   changePasswordSchema,
+  forgotPasswordSchema,
   googleSignInSchema,
   loginSchema,
   onboardingSchema,
   refreshTokenSchema,
   registerSchema,
+  resetPasswordSchema,
   validateOrThrow,
   verificationTokenSchema,
   type ChangePasswordInput,
@@ -47,6 +49,16 @@ export interface VerificationEmailSender {
   sendVerificationEmail(data: VerificationEmailData): Promise<void>;
 }
 
+export interface PasswordResetEmailData {
+  to: string;
+  token: string;
+  expiresAt: Date;
+}
+
+export interface PasswordResetEmailSender {
+  sendPasswordResetEmail(data: PasswordResetEmailData): Promise<void>;
+}
+
 /** Welcome email payload: the freshly-onboarded owner and their store. */
 export interface WelcomeEmailData {
   to: string;
@@ -63,6 +75,11 @@ export const VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Resend cooldown: at most one verification email per 60 seconds. */
 export const VERIFICATION_RESEND_COOLDOWN_MS = 60_000;
+
+/** Password reset links expire one hour after they are issued. */
+export const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
+/** Avoid repeated reset-email delivery to the same account in a short window. */
+export const PASSWORD_RESET_COOLDOWN_MS = 60_000;
 
 /** Fresh single-use verification token: `vrf_` + 32 bytes base64url. */
 export function generateVerificationToken(): string {
@@ -421,6 +438,123 @@ export async function verifyEmail(rawToken: unknown): Promise<{ verified: true }
     data: { emailVerifiedAt: new Date() },
   });
   return { verified: true };
+}
+
+function hashPasswordResetToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+/**
+ * Always returns the same result for a syntactically valid email so callers
+ * cannot use this endpoint to discover which addresses have accounts.
+ * The emailed credential is 256 bits of randomness; only its SHA-256 digest
+ * is persisted. A per-account cooldown complements the public IP limiter.
+ */
+export async function requestPasswordReset(
+  rawInput: unknown,
+  sender: PasswordResetEmailSender,
+): Promise<{ accepted: true }> {
+  const { email } = validateOrThrow(forgotPasswordSchema, rawInput);
+  const prisma = getPrismaClient();
+  const account = await prisma.account.findUnique({
+    where: { email },
+    select: { id: true, email: true },
+  });
+  if (account === null) return { accepted: true };
+
+  const now = new Date();
+  await prisma.passwordResetToken.deleteMany({
+    where: {
+      accountId: account.id,
+      OR: [{ expiresAt: { lte: now } }, { usedAt: { not: null } }],
+    },
+  });
+
+  const recentToken = await prisma.passwordResetToken.findFirst({
+    where: {
+      accountId: account.id,
+      usedAt: null,
+      expiresAt: { gt: now },
+      createdAt: { gte: new Date(now.getTime() - PASSWORD_RESET_COOLDOWN_MS) },
+    },
+    select: { id: true },
+  });
+  if (recentToken !== null) return { accepted: true };
+
+  const token = `rst_${randomBytes(32).toString("base64url")}`;
+  const expiresAt = new Date(now.getTime() + PASSWORD_RESET_TTL_MS);
+  await prisma.passwordResetToken.create({
+    data: {
+      accountId: account.id,
+      tokenHash: hashPasswordResetToken(token),
+      expiresAt,
+    },
+  });
+
+  try {
+    await sender.sendPasswordResetEmail({ to: account.email, token, expiresAt });
+  } catch (err) {
+    // Keep the public response indistinguishable for existing and unknown
+    // accounts. Do not log the recipient or the reset credential.
+    console.error(
+      `[password-reset] email delivery failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  return { accepted: true };
+}
+
+/**
+ * Consumes a reset link exactly once, changes the password, invalidates any
+ * other outstanding reset links, and revokes all refresh sessions atomically.
+ */
+export async function resetPassword(rawInput: unknown): Promise<void> {
+  const { token, newPassword } = validateOrThrow(resetPasswordSchema, rawInput);
+  const prisma = getPrismaClient();
+  const tokenHash = hashPasswordResetToken(token);
+  const resetToken = await prisma.passwordResetToken.findUnique({ where: { tokenHash } });
+  const now = new Date();
+  if (
+    resetToken === null ||
+    resetToken.usedAt !== null ||
+    resetToken.expiresAt.getTime() <= now.getTime()
+  ) {
+    throw new AppError(
+      400,
+      "PASSWORD_RESET_INVALID",
+      "This password reset link is invalid or has expired. Request a new one.",
+    );
+  }
+
+  const passwordHash = await bcrypt.hash(newPassword, BCRYPT_COST);
+  const consumed = await prisma.$transaction(async (tx) => {
+    const claim = await tx.passwordResetToken.updateMany({
+      where: { id: resetToken.id, usedAt: null, expiresAt: { gt: now } },
+      data: { usedAt: now },
+    });
+    if (claim.count !== 1) return false;
+
+    await tx.account.update({
+      where: { id: resetToken.accountId },
+      data: { passwordHash },
+    });
+    await tx.refreshToken.updateMany({
+      where: { accountId: resetToken.accountId, revokedAt: null },
+      data: { revokedAt: now },
+    });
+    await tx.passwordResetToken.updateMany({
+      where: { accountId: resetToken.accountId, usedAt: null },
+      data: { usedAt: now },
+    });
+    return true;
+  });
+
+  if (!consumed) {
+    throw new AppError(
+      400,
+      "PASSWORD_RESET_INVALID",
+      "This password reset link is invalid or has expired. Request a new one.",
+    );
+  }
 }
 
 /**

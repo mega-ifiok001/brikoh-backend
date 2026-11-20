@@ -285,12 +285,13 @@ model Account {
   createdAt       DateTime  @default(now()) @db.Timestamptz(3)
   updatedAt       DateTime  @updatedAt @db.Timestamptz(3)
 
-  owner              Owner?
-  staffMembers       StaffMember[]
-  refreshTokens      RefreshToken[]
-  verificationTokens AccountVerificationToken[]
-  supportTicketsRaised SupportTicket[] @relation("TicketRaisedBy")
-  ticketMessages TicketMessage[] @relation("TicketMessageAccountAuthor")
+  owner                Owner?
+  staffMembers         StaffMember[]
+  refreshTokens        RefreshToken[]
+  verificationTokens   AccountVerificationToken[]
+  passwordResetTokens  PasswordResetToken[]
+  supportTicketsRaised SupportTicket[]            @relation("TicketRaisedBy")
+  ticketMessages       TicketMessage[]            @relation("TicketMessageAccountAuthor")
 }
 
 // Single-use email-verification tokens. Raw token values (like invite
@@ -308,6 +309,22 @@ model AccountVerificationToken {
   createdAt DateTime  @default(now()) @db.Timestamptz(3)
 
   @@index([accountId])
+}
+
+// Password reset credentials are stored as SHA-256 hashes, never in raw form.
+// The raw token is high entropy and emailed once; usedAt is guarded in a
+// transaction with the password change so concurrent submissions cannot win.
+model PasswordResetToken {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  tokenHash String    @unique @db.VarChar(64)
+  accountId String    @db.Uuid
+  account   Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  expiresAt DateTime  @db.Timestamptz(3)
+  usedAt    DateTime? @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@index([accountId, createdAt])
+  @@index([expiresAt])
 }
 
 // Single-use refresh sessions. Only tokenHash (bcrypt, like passwords) is
@@ -367,7 +384,7 @@ model Store {
   purchaseOrderCounter Int               @default(0)
   // Store-sequential order numbering: bumped inside the order-create
   // transaction, so ORD-#### numbers never repeat per store.
-  orderCounter Int                       @default(0)
+  orderCounter         Int               @default(0)
   createdAt            DateTime          @default(now()) @db.Timestamptz(3)
   updatedAt            DateTime          @updatedAt @db.Timestamptz(3)
 
@@ -687,28 +704,28 @@ model Unit {
 // (products are soft-deleted in normal operation, so this fires only on
 // tenant-wide cascade).
 model ProductVariant {
-  id           String   @id @default(uuid(7)) @db.Uuid
-  storeId      String   @db.Uuid
-  store        Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
-  productId    String   @db.Uuid
-  product      Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  id           String    @id @default(uuid(7)) @db.Uuid
+  storeId      String    @db.Uuid
+  store        Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  productId    String    @db.Uuid
+  product      Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
   name         String
   // Overrides the parent product's price when set; otherwise the
   // effective price is product.price.
-  sellingPrice Decimal? @db.Decimal(10, 2)
+  sellingPrice Decimal?  @db.Decimal(10, 2)
   sku          String?
   // Cached per-variant stock — the same ledger discipline as
   // Product.quantity: NEVER written directly, every change goes through
   // the stock-adjustment transaction (ledger.service) which atomically
   // enforces quantity >= 0.
-  quantity     Int      @default(0)
+  quantity     Int       @default(0)
   // Soft-retire: set when the variant is archived (hidden from the public
   // storefront and rejected for sale), null while sellable. History and
   // stock rows are kept (order/ledger FKs are Restrict), and an archived
   // variant can still receive stock adjustments (write-offs).
   archivedAt   DateTime? @db.Timestamptz(3)
-  createdAt    DateTime @default(now()) @db.Timestamptz(3)
-  updatedAt    DateTime @updatedAt @db.Timestamptz(3)
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @db.Timestamptz(3)
 
   stockLedgerEntries        StockLedgerEntry[]
   orderLineItems            OrderLineItem[]
@@ -1002,12 +1019,12 @@ model Discount {
   // carries any of these becomes a coupon — enforced at sale time, every
   // successful use writes a CouponRedemption row. Group auto-discounts
   // are rules, not codes, and stay exempt from redemption accounting.
-maxUses          Int?     // global redemption cap
-  perCustomerUses  Int?     @default(1) // cap per customer
-  minSubtotal      Decimal? @db.Decimal(10, 2)
+  maxUses         Int? // global redemption cap
+  perCustomerUses Int?         @default(1) // cap per customer
+  minSubtotal     Decimal?     @db.Decimal(10, 2)
   // No default: NULL means "not a coupon rule" — a false default would
   // mark every discount as a coupon (hasCouponRules keys off non-null).
-  firstOrderOnly Boolean?
+  firstOrderOnly  Boolean?
   createdAt       DateTime     @default(now()) @db.Timestamptz(3)
   updatedAt       DateTime     @updatedAt @db.Timestamptz(3)
 
@@ -1076,27 +1093,27 @@ model CouponRedemption {
 // Restrict on customer: financial records must survive customer deletion.
 // A DB (deferred) trigger enforces "at least one line item" at commit.
 model Order {
-  id               String         @id @default(uuid(7)) @db.Uuid
-  storeId          String         @db.Uuid
-  store            Store          @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  id                   String          @id @default(uuid(7)) @db.Uuid
+  storeId              String          @db.Uuid
+  store                Store           @relation(fields: [storeId], references: [id], onDelete: Cascade)
   // Store-sequential human number (ORD-####). Assigned at creation
   // inside the order's transaction (Store.orderCounter bump), so
   // numbers are gap-free per store and never reused.
-  orderNumber      String         @db.VarChar(16)
-  customerId       String         @db.Uuid
-  customer         Customer       @relation(fields: [customerId], references: [id], onDelete: Restrict)
-  status           OrderStatus    @default(PENDING)
-  total            Decimal        @db.Decimal(10, 2)
+  orderNumber          String          @db.VarChar(16)
+  customerId           String          @db.Uuid
+  customer             Customer        @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  status               OrderStatus     @default(PENDING)
+  total                Decimal         @db.Decimal(10, 2)
   // Cart-level discount applied at sale time (POS record-sale). Line
   // totals are the undiscounted captured prices; this is the one
   // order-wide reduction. Computed server-side from a managed Discount
   // (or the customer's group discount); clients never supply it.
-  discountAmount   Decimal        @default(0) @db.Decimal(10, 2)
+  discountAmount       Decimal         @default(0) @db.Decimal(10, 2)
   // The managed discount rule used at sale time (dashboard-discounts).
   // SetNull on discount deletion: discountAmount is the captured money
   // fact and must survive; discountId is informational attribution.
-  discountId       String?        @db.Uuid
-  discount         Discount?      @relation(fields: [discountId], references: [id], onDelete: SetNull)
+  discountId           String?         @db.Uuid
+  discount             Discount?       @relation(fields: [discountId], references: [id], onDelete: SetNull)
   // POS-sale payment facts (dashboard orders service). Null on
   // storefront orders: those go through a payment provider (the PENDING
   // row's payment fields below record the initiation, not proof of
@@ -1104,73 +1121,73 @@ model Order {
   // sale with amountPaid < total is an outstanding balance the customer
   // owes (balance = total - amountPaid; credit repayments consume it in
   // a later phase). CARD keeps amountPaid null until the webhook pays.
-  paymentMethod    PaymentMethod?
-  amountPaid       Decimal?       @db.Decimal(10, 2)
+  paymentMethod        PaymentMethod?
+  amountPaid           Decimal?        @db.Decimal(10, 2)
   // First successful paid transition. Unlike updatedAt, this remains stable
   // when fulfillment later changes status (e.g. PAID -> SHIPPED).
-  paidAt           DateTime?      @db.Timestamptz(3)
+  paidAt               DateTime?       @db.Timestamptz(3)
   // Where the order came from — POS sales vs storefront checkouts;
   // powers the revenue-by-channel breakdown later.
-  source           OrderSource    @default(STOREFRONT)
+  source               OrderSource     @default(STOREFRONT)
   // Payment tracking: set at checkout initiation. The Order stays
   // PENDING until the payment webhook confirms it (Phase 9); payment
   // fields on a PENDING row are the initiation record, not proof of
   // payment. paymentReference is generated by the checkout service and
   // echoed by the provider.
-  paymentProvider  String?
-  paymentReference String?
-  authorizationUrl String?
+  paymentProvider      String?
+  paymentReference     String?
+  authorizationUrl     String?
   // Set when the customer clicks "I have paid" on a bank-transfer order.
-  paymentSubmittedAt DateTime? @db.Timestamptz(3)
+  paymentSubmittedAt   DateTime?       @db.Timestamptz(3)
   // Recipient for the customer receipt email, FROZEN at order creation
   // (like unitPriceAtPurchase): the storefront buyer's email, or the POS
   // customer's email / explicit `email` override. Null when no email was
   // known (e.g. a walk-in POS cash sale) — the receipt is skipped then.
   // Frozen so a later edit to the customer row can't misdirect a receipt,
   // and so the POS CARD email override survives to the webhook.
-  receiptEmail      String?    @db.VarChar(320)
+  receiptEmail         String?         @db.VarChar(320)
   // Bank details FROZEN at checkout (mirrors unitPriceAtPurchase): the
   // public endpoint reads these, never the live BankAccount row, so editing
   // or deleting the merchant's bank account can't misdirect an in-flight
   // payment. bankAccountId is traceability only.
-  bankAccountId String?     @db.Uuid
-  bankName      String?     @db.VarChar(2048)
-  accountName   String?     @db.VarChar(2048)
-  accountNumber String?     @db.VarChar(64)
-  bankAccount  BankAccount? @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+  bankAccountId        String?         @db.Uuid
+  bankName             String?         @db.VarChar(2048)
+  accountName          String?         @db.VarChar(2048)
+  accountNumber        String?         @db.VarChar(64)
+  bankAccount          BankAccount?    @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
   // Fulfilment FROZEN at storefront checkout (same discipline as the bank
   // snapshot): the chosen option name, the fee, and the customer's address
   // are copied here so editing or deleting a DeliveryOption never rewrites
   // a placed order. deliveryFee is already included in `total`.
-  deliveryOptionId       String?         @db.Uuid
-  deliveryOption         DeliveryOption? @relation(fields: [deliveryOptionId], references: [id], onDelete: SetNull)
-  deliveryKind           DeliveryKind?
-  deliveryOptionName     String?         @db.VarChar(200)
-  deliveryFee            Decimal         @default(0) @db.Decimal(10, 2)
+  deliveryOptionId     String?         @db.Uuid
+  deliveryOption       DeliveryOption? @relation(fields: [deliveryOptionId], references: [id], onDelete: SetNull)
+  deliveryKind         DeliveryKind?
+  deliveryOptionName   String?         @db.VarChar(200)
+  deliveryFee          Decimal         @default(0) @db.Decimal(10, 2)
   // Customer-supplied delivery details (DELIVERY options only; null for
   // pickup). address/city/state/phone are required at checkout, instructions
   // optional. Frozen here so later edits to the customer never rewrite it.
-  deliveryAddress        String?         @db.VarChar(500)
-  deliveryCity           String?         @db.VarChar(120)
-  deliveryState          String?         @db.VarChar(120)
-  deliveryPhone          String?         @db.VarChar(30)
-  deliveryInstructions   String?         @db.VarChar(500)
+  deliveryAddress      String?         @db.VarChar(500)
+  deliveryCity         String?         @db.VarChar(120)
+  deliveryState        String?         @db.VarChar(120)
+  deliveryPhone        String?         @db.VarChar(30)
+  deliveryInstructions String?         @db.VarChar(500)
   // The branch whose stock this order decrements on payment
   // confirmation (the store's default branch at initiation). Restrict on
   // branch: financial history must keep its attribution, so a branch with
   // any order history cannot be deleted (the service layer surfaces this
   // as a 409).
-  branchId         String         @db.Uuid
-  branch           Branch         @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  branchId             String          @db.Uuid
+  branch               Branch          @relation(fields: [branchId], references: [id], onDelete: Restrict)
   // Staff sales attribution (canonical source for staff analytics). Set by
   // the sales workflow that completes an order on behalf of a staff member;
   // null for orders placed entirely by the customer through public checkout.
   // SetNull on staff deletion: financial history keeps its integrity, and
   // staff-performance reporting treats the order as unattributed.
-  soldByStaffId    String?        @db.Uuid
-  soldByStaff      StaffMember?   @relation("SoldOrders", fields: [soldByStaffId], references: [id], onDelete: SetNull)
-  createdAt        DateTime       @default(now()) @db.Timestamptz(3)
-  updatedAt        DateTime       @updatedAt @db.Timestamptz(3)
+  soldByStaffId        String?         @db.Uuid
+  soldByStaff          StaffMember?    @relation("SoldOrders", fields: [soldByStaffId], references: [id], onDelete: SetNull)
+  createdAt            DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt            DateTime        @updatedAt @db.Timestamptz(3)
 
   lineItems        OrderLineItem[]
   creditRepayments CreditRepayment[]
@@ -1250,30 +1267,30 @@ model OrderLineItem {
 // (below) and PAID is reached automatically when amountPaid = total.
 // Payments on the books block VOID.
 model Invoice {
-  id         String        @id @default(uuid(7)) @db.Uuid
-  storeId    String        @db.Uuid
-  store      Store         @relation(fields: [storeId], references: [id], onDelete: Cascade)
-  customerId String        @db.Uuid
-  customer   Customer      @relation(fields: [customerId], references: [id], onDelete: Restrict)
-  status     InvoiceStatus @default(DRAFT)
+  id          String        @id @default(uuid(7)) @db.Uuid
+  storeId     String        @db.Uuid
+  store       Store         @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  customerId  String        @db.Uuid
+  customer    Customer      @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  status      InvoiceStatus @default(DRAFT)
   // Human number (INV-####, per-store sequence). Null while DRAFT;
   // assigned once at issue and never reused.
-  number     String?
-  total      Decimal       @db.Decimal(10, 2)
+  number      String?
+  total       Decimal       @db.Decimal(10, 2)
   // Advances with InvoicePayment rows; the driver of the PAID status,
   // never set by hand.
-  amountPaid Decimal       @default(0) @db.Decimal(10, 2)
+  amountPaid  Decimal       @default(0) @db.Decimal(10, 2)
   // Informational only (no enforcement in the invoices phase).
-  dueDate    DateTime?     @db.Timestamptz(3)
-  issuedAt   DateTime?     @db.Timestamptz(3)
+  dueDate     DateTime?     @db.Timestamptz(3)
+  issuedAt    DateTime?     @db.Timestamptz(3)
   // Whether the public share link is live. Defaults to true at issue
   // (all existing invoices keep working). The merchant can toggle it
   // off to kill a shared link without voiding the invoice — a disabled
   // link behaves exactly like an unknown/draft id (404), so disabling
   // leaks nothing.
-  linkEnabled Boolean      @default(true)
-  createdAt  DateTime      @default(now()) @db.Timestamptz(3)
-  updatedAt  DateTime      @updatedAt @db.Timestamptz(3)
+  linkEnabled Boolean       @default(true)
+  createdAt   DateTime      @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime      @updatedAt @db.Timestamptz(3)
 
   lineItems InvoiceLineItem[]
   payments  InvoicePayment[]
@@ -1348,62 +1365,66 @@ model NotificationDispatch {
 
 // === Purchasing (suppliers + purchase orders) ===========================
 model SupportTicket {
-  id String @id @default(uuid(7)) @db.Uuid
-  storeId String @db.Uuid
-  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
-  subject String
-  priority TicketPriority @default(MEDIUM)
-  status TicketStatus @default(OPEN)
-  raisedByAccountId String? @db.Uuid
-  raisedByAccount Account? @relation("TicketRaisedBy", fields: [raisedByAccountId], references: [id], onDelete: SetNull)
-  assignedAdminId String? @db.Uuid
-  assignedAdmin AdminUser? @relation("TicketAssignedAdmin", fields: [assignedAdminId], references: [id], onDelete: SetNull)
-  resolvedAt DateTime? @db.Timestamptz(3)
-  closedAt DateTime? @db.Timestamptz(3)
-  createdAt DateTime @default(now()) @db.Timestamptz(3)
-  updatedAt DateTime @updatedAt @db.Timestamptz(3)
-  messages TicketMessage[]
+  id                String          @id @default(uuid(7)) @db.Uuid
+  storeId           String          @db.Uuid
+  store             Store           @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  subject           String
+  priority          TicketPriority  @default(MEDIUM)
+  status            TicketStatus    @default(OPEN)
+  raisedByAccountId String?         @db.Uuid
+  raisedByAccount   Account?        @relation("TicketRaisedBy", fields: [raisedByAccountId], references: [id], onDelete: SetNull)
+  assignedAdminId   String?         @db.Uuid
+  assignedAdmin     AdminUser?      @relation("TicketAssignedAdmin", fields: [assignedAdminId], references: [id], onDelete: SetNull)
+  resolvedAt        DateTime?       @db.Timestamptz(3)
+  closedAt          DateTime?       @db.Timestamptz(3)
+  createdAt         DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime        @updatedAt @db.Timestamptz(3)
+  messages          TicketMessage[]
+
   @@index([storeId, status, createdAt])
   @@index([assignedAdminId, status, createdAt])
 }
 
 model TicketMessage {
-  id String @id @default(uuid(7)) @db.Uuid
-  ticketId String @db.Uuid
-  ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
-  authorType TicketAuthorType
-  authorAccountId String? @db.Uuid
-  authorAccount Account? @relation("TicketMessageAccountAuthor", fields: [authorAccountId], references: [id], onDelete: SetNull)
-  authorAdminId String? @db.Uuid
-  authorAdmin AdminUser? @relation("TicketMessageAdminAuthor", fields: [authorAdminId], references: [id], onDelete: SetNull)
-  body String
-  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  id              String           @id @default(uuid(7)) @db.Uuid
+  ticketId        String           @db.Uuid
+  ticket          SupportTicket    @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  authorType      TicketAuthorType
+  authorAccountId String?          @db.Uuid
+  authorAccount   Account?         @relation("TicketMessageAccountAuthor", fields: [authorAccountId], references: [id], onDelete: SetNull)
+  authorAdminId   String?          @db.Uuid
+  authorAdmin     AdminUser?       @relation("TicketMessageAdminAuthor", fields: [authorAdminId], references: [id], onDelete: SetNull)
+  body            String
+  createdAt       DateTime         @default(now()) @db.Timestamptz(3)
+
   @@index([ticketId, createdAt, id])
 }
 
 model Announcement {
-  id String @id @default(uuid(7)) @db.Uuid
-  title String
-  body String
-  targetTier SubscriptionTier?
-  publishedAt DateTime? @db.Timestamptz(3)
-  isActive Boolean @default(true)
-  createdByAdminId String @db.Uuid
-  createdByAdmin AdminUser @relation(fields: [createdByAdminId], references: [id], onDelete: Restrict)
-  createdAt DateTime @default(now()) @db.Timestamptz(3)
-  updatedAt DateTime @updatedAt @db.Timestamptz(3)
-  views AnnouncementView[]
+  id               String             @id @default(uuid(7)) @db.Uuid
+  title            String
+  body             String
+  targetTier       SubscriptionTier?
+  publishedAt      DateTime?          @db.Timestamptz(3)
+  isActive         Boolean            @default(true)
+  createdByAdminId String             @db.Uuid
+  createdByAdmin   AdminUser          @relation(fields: [createdByAdminId], references: [id], onDelete: Restrict)
+  createdAt        DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime           @updatedAt @db.Timestamptz(3)
+  views            AnnouncementView[]
+
   @@index([publishedAt, isActive, targetTier])
   @@index([createdAt])
 }
 
 model AnnouncementView {
-  id String @id @default(uuid(7)) @db.Uuid
-  announcementId String @db.Uuid
-  announcement Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
-  storeId String @db.Uuid
-  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
-  viewedAt DateTime @default(now()) @db.Timestamptz(3)
+  id             String       @id @default(uuid(7)) @db.Uuid
+  announcementId String       @db.Uuid
+  announcement   Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  storeId        String       @db.Uuid
+  store          Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  viewedAt       DateTime     @default(now()) @db.Timestamptz(3)
+
   @@unique([announcementId, storeId])
   @@index([announcementId])
 }
@@ -1673,23 +1694,23 @@ enum DeliveryKind {
 // history never depends on this row. (No zones/distance pricing in Phase 1;
 // the shape leaves room for a richer pricing model later.)
 model DeliveryOption {
-  id          String       @id @default(uuid(7)) @db.Uuid
-  storeId     String       @db.Uuid
-  store       Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
-  name        String       @db.VarChar(200)
-  kind        DeliveryKind
-  description String?      @db.VarChar(500)
+  id                String       @id @default(uuid(7)) @db.Uuid
+  storeId           String       @db.Uuid
+  store             Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  name              String       @db.VarChar(200)
+  kind              DeliveryKind
+  description       String?      @db.VarChar(500)
   // The flat fee charged when this option is chosen.
-  baseFee     Decimal      @default(0) @db.Decimal(10, 2)
+  baseFee           Decimal      @default(0) @db.Decimal(10, 2)
   // false hides it from the storefront checkout.
-  isActive    Boolean      @default(true)
-  sortOrder   Int          @default(0)
+  isActive          Boolean      @default(true)
+  sortOrder         Int          @default(0)
   // PICKUP only: a reused store Location and/or a free-text address.
-  pickupLocationId   String?   @db.Uuid
-  pickupLocation     Location? @relation(fields: [pickupLocationId], references: [id], onDelete: SetNull)
-  pickupAddressText  String?   @db.VarChar(500)
-  createdAt   DateTime     @default(now()) @db.Timestamptz(3)
-  updatedAt   DateTime     @updatedAt @db.Timestamptz(3)
+  pickupLocationId  String?      @db.Uuid
+  pickupLocation    Location?    @relation(fields: [pickupLocationId], references: [id], onDelete: SetNull)
+  pickupAddressText String?      @db.VarChar(500)
+  createdAt         DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime     @updatedAt @db.Timestamptz(3)
 
   orders Order[]
 
@@ -1751,43 +1772,43 @@ model Expense {
 // Store.subscriptionId points at the active one. Caps are nullable:
 // null = unlimited.
 model Subscription {
-  id                 String             @id @default(uuid(7)) @db.Uuid
-  storeId            String             @db.Uuid
-  store              Store              @relation("SubscriptionHistory", fields: [storeId], references: [id], onDelete: Cascade)
-  tier               SubscriptionTier
-  status             SubscriptionStatus
-  currentPeriodEnd   DateTime           @db.Timestamptz(3)
+  id                             String             @id @default(uuid(7)) @db.Uuid
+  storeId                        String             @db.Uuid
+  store                          Store              @relation("SubscriptionHistory", fields: [storeId], references: [id], onDelete: Cascade)
+  tier                           SubscriptionTier
+  status                         SubscriptionStatus
+  currentPeriodEnd               DateTime           @db.Timestamptz(3)
   // Billing-period start, so the window for the rolling orderCap is exact
   // (createdAt >= currentPeriodStart). Null falls back to the last 30 days
   // at read time so pre-existing rows remain valid until re-provisioned.
-  currentPeriodStart DateTime?          @db.Timestamptz(3)
-  staffCap           Int?
-  locationCap        Int?
-  productCap         Int?
-  orderCap           Int?
+  currentPeriodStart             DateTime?          @db.Timestamptz(3)
+  staffCap                       Int?
+  locationCap                    Int?
+  productCap                     Int?
+  orderCap                       Int?
   // Visible storefront templates. Null = the tier default (ENTERPRISE's
   // null means all). Unlike the resource caps, a store with NO
   // subscription does not become unlimited — the templates service
   // treats the pre-subscription state as the STARTER set (see
   // dashboard-store-templates.md).
-  templateCap        Int?
+  templateCap                    Int?
   // A downgrade the merchant scheduled: the store KEEPS its current
   // (higher) tier and features until currentPeriodEnd, then the sweep
   // applies this tier (caps down, Paystack plan switched). Null = none.
-  pendingDowngradeTier SubscriptionTier?
+  pendingDowngradeTier           SubscriptionTier?
   // Set when a renewal charge fails. PAST_DUE stays USABLE for the grace
   // window (SUBSCRIPTION_GRACE_PERIOD_MS) before enforcement kicks in;
   // the sweep clears/flips this once grace elapses.
-  pastDueAt            DateTime?       @db.Timestamptz(3)
+  pastDueAt                      DateTime?          @db.Timestamptz(3)
   // Paystack recurring-subscription linkage (platform account, NOT the
   // merchant's storefront keys). The code + email token are required to
   // disable/replace the subscription; captured from subscription.create
   // or the post-upgrade create call.
-  paystackSubscriptionCode String?
+  paystackSubscriptionCode       String?
   // Snapshot of the Paystack plan currently billed. Kept in lockstep with
   // `tier` so a renewal event can be matched back to the right plan.
-  paystackPlanCode         String?
-  paystackEmailToken       String?
+  paystackPlanCode               String?
+  paystackEmailToken             String?
   // The PREVIOUS subscription code/plan during an upgrade swap. Kept until
   // the old subscription's disable is confirmed; a renewal event matching
   // this pair after the switch is a double-charge (Guard 1) and is
@@ -1797,11 +1818,11 @@ model Subscription {
   // True while an upgrade swap could not confirm the old subscription's
   // disable (wrapped in the same guarded update as the swap). The sweep
   // retries the disable until it succeeds.
-  swapPending              Boolean       @default(false)
+  swapPending                    Boolean            @default(false)
   // Paid renewal cycles since activation (analytics).
-  renewalCount             Int           @default(0)
-  createdAt          DateTime           @default(now()) @db.Timestamptz(3)
-  updatedAt          DateTime           @updatedAt @db.Timestamptz(3)
+  renewalCount                   Int                @default(0)
+  createdAt                      DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt                      DateTime           @updatedAt @db.Timestamptz(3)
 
   activeStore Store? @relation("ActiveSubscription")
 
@@ -1927,12 +1948,12 @@ model AdminUser {
   createdAt       DateTime @default(now()) @db.Timestamptz(3)
   updatedAt       DateTime @updatedAt @db.Timestamptz(3)
 
-  auditLogs      AdminAuditLog[]
-  pricingUpdates SubscriptionPlanSetting[]
-  refreshTokens  AdminRefreshToken[]
-  assignedSupportTickets SupportTicket[] @relation("TicketAssignedAdmin")
-  ticketMessages TicketMessage[] @relation("TicketMessageAdminAuthor")
-  announcements Announcement[]
+  auditLogs              AdminAuditLog[]
+  pricingUpdates         SubscriptionPlanSetting[]
+  refreshTokens          AdminRefreshToken[]
+  assignedSupportTickets SupportTicket[]           @relation("TicketAssignedAdmin")
+  ticketMessages         TicketMessage[]           @relation("TicketMessageAdminAuthor")
+  announcements          Announcement[]
 
   @@index([roleId])
 }
@@ -1942,17 +1963,17 @@ model AdminUser {
 // rotate/reset so a leaked secret can't outlive the credential change.
 // Mirrors the merchant RefreshToken shape: family rotates, reuse = theft.
 model AdminRefreshToken {
-  id          String   @id @default(uuid(7)) @db.Uuid
-  adminId     String   @db.Uuid
-  admin       AdminUser @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  id        String    @id @default(uuid(7)) @db.Uuid
+  adminId   String    @db.Uuid
+  admin     AdminUser @relation(fields: [adminId], references: [id], onDelete: Cascade)
   // Opaque token id (rt_<random>); the secret half is never persisted.
-  tokenId     String   @unique
-  family      String
-  ipAddress   String?
-  userAgent   String?
-  expiresAt   DateTime @db.Timestamptz(3)
-  revokedAt   DateTime? @db.Timestamptz(3)
-  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  tokenId   String    @unique
+  family    String
+  ipAddress String?
+  userAgent String?
+  expiresAt DateTime  @db.Timestamptz(3)
+  revokedAt DateTime? @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
 
   @@index([adminId])
 }
@@ -1983,15 +2004,15 @@ model AdminAuditLog {
 // (STARTER). Prices are never compiled into code: the admin dashboard
 // changes them here at runtime, and MRR reads this table.
 model SubscriptionPlanSetting {
-  plan         SubscriptionTier @id
-  monthlyPrice Decimal?         @db.Decimal(10, 2)
+  plan             SubscriptionTier @id
+  monthlyPrice     Decimal?         @db.Decimal(10, 2)
   // The Paystack plan (PLN_...) the platform created for this tier.
   // Admin creates it (POST /plan) and stores the code here; checkout
   // refuses to bill a tier without one (409 PRICING_NOT_CONFIGURED).
   paystackPlanCode String?
-  updatedById  String?          @db.Uuid
-  updatedBy    AdminUser?       @relation(fields: [updatedById], references: [id], onDelete: SetNull)
-  updatedAt    DateTime         @updatedAt @db.Timestamptz(3)
+  updatedById      String?          @db.Uuid
+  updatedBy        AdminUser?       @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+  updatedAt        DateTime         @updatedAt @db.Timestamptz(3)
 
   @@index([updatedById])
 }

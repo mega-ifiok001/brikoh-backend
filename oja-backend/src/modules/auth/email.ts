@@ -3,7 +3,12 @@ import { APP_NAME } from "../../lib/email/branding.js";
 import { escapeHtml, renderEmailLayout } from "../../lib/email/layout.js";
 import { sendBuiltEmail, type ResendEmailClient } from "../../lib/email/resend.js";
 import { formatHumanDate } from "../../lib/format-date.js";
-import type { VerificationEmailData, VerificationEmailSender } from "./service.js";
+import type {
+  PasswordResetEmailData,
+  PasswordResetEmailSender,
+  VerificationEmailData,
+  VerificationEmailSender,
+} from "./service.js";
 
 export { createResendClient, type ResendEmailClient } from "../../lib/email/resend.js";
 
@@ -13,6 +18,13 @@ export interface BuiltVerificationEmail {
   text: string;
 }
 
+/** Builds the HTTPS URL that web and native apps register for email verification. */
+export function buildVerificationLink(token: string): string {
+  const link = new URL("/verify-email", env.FRONTEND_URL);
+  link.searchParams.set("token", token);
+  return link.toString();
+}
+
 /**
  * Builds the HTML + text verification email. The expiry is rendered
  * through the shared human-date utility (never a raw UTC string). The
@@ -20,7 +32,7 @@ export interface BuiltVerificationEmail {
  * travels in the href, and generated tokens are URL-safe base64url.
  */
 export function buildVerificationEmail(data: VerificationEmailData): BuiltVerificationEmail {
-  const verifyLink = `${env.FRONTEND_URL}/#/verify?token=${data.token}`;
+  const verifyLink = buildVerificationLink(data.token);
   const expiry = formatHumanDate(data.expiresAt);
 
   const subject = `Verify your email on ${APP_NAME}`;
@@ -68,7 +80,60 @@ export class ConsoleVerificationSender implements VerificationEmailSender {
   async sendVerificationEmail(data: VerificationEmailData): Promise<void> {
     const email = buildVerificationEmail(data);
     console.log(
-      `[verify-email:stub] to ${data.to} — subject "${email.subject}" — link: ${`${env.FRONTEND_URL}/#/verify?token=${data.token}`} (expires ${formatHumanDate(data.expiresAt)})`,
+      `[verify-email:stub] to ${data.to} — subject "${email.subject}" — link: ${buildVerificationLink(data.token)} (expires ${formatHumanDate(data.expiresAt)})`,
+    );
+  }
+}
+
+export interface BuiltPasswordResetEmail {
+  subject: string;
+  html: string;
+  text: string;
+}
+
+export function buildPasswordResetEmail(data: PasswordResetEmailData): BuiltPasswordResetEmail {
+  const resetLink = `${env.FRONTEND_URL}/#/reset-password?token=${encodeURIComponent(data.token)}`;
+  const expiry = formatHumanDate(data.expiresAt);
+  const subject = `Reset your ${APP_NAME} password`;
+  const text = [
+    `We received a request to reset your ${APP_NAME} password.`,
+    "",
+    `Reset your password: ${resetLink}`,
+    "",
+    `This link expires on ${expiry} and can only be used once.`,
+    "If you didn't request this reset, you can ignore this email.",
+  ].join("\n");
+  const html = renderEmailLayout({
+    title: `Reset your ${APP_NAME} password`,
+    body: [
+      `<p style="margin:0 0 24px;color:#52525b;">We received a request to reset your password. Use the link below to choose a new one.</p>`,
+    ],
+    cta: { label: "Reset password", href: resetLink },
+    footer: [
+      `This link expires on ${expiry} and can only be used once.`,
+      `If you didn't request this reset, you can ignore this email.`,
+    ],
+  });
+  return { subject, html, text };
+}
+
+export class ResendPasswordResetSender implements PasswordResetEmailSender {
+  constructor(
+    private readonly client: ResendEmailClient,
+    private readonly fromEmail: string,
+  ) {}
+
+  async sendPasswordResetEmail(data: PasswordResetEmailData): Promise<void> {
+    await sendBuiltEmail(this.client, this.fromEmail, data.to, buildPasswordResetEmail(data));
+  }
+}
+
+/** Test-only sender that exposes the link in test output, never in production. */
+export class ConsolePasswordResetSender implements PasswordResetEmailSender {
+  async sendPasswordResetEmail(data: PasswordResetEmailData): Promise<void> {
+    const email = buildPasswordResetEmail(data);
+    console.log(
+      `[password-reset:stub] to ${data.to} — subject "${email.subject}" — link: ${env.FRONTEND_URL}/#/reset-password?token=${data.token} (expires ${formatHumanDate(data.expiresAt)})`,
     );
   }
 }

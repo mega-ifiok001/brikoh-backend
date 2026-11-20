@@ -21,6 +21,7 @@
 import express, { type Express } from "express";
 import helmet from "helmet";
 import cors from "cors";
+import swaggerUi from "swagger-ui-express";
 import { env } from "./src/config/env.js";
 import { AppError } from "./src/lib/AppError.js";
 import { isAllowedCorsOrigin } from "./src/lib/cors.js";
@@ -111,6 +112,18 @@ export function createApp(): Express {
   );
 
   app.use(requestLogger);
+
+  // Interactive OpenAPI reference for authentication endpoints. The UI
+  // assets are served locally by swagger-ui-express; only the spec is static.
+  app.use("/api-docs/openapi", express.static("public/openapi", { fallthrough: false }));
+  app.use(
+    "/api-docs",
+    swaggerUi.serve,
+    swaggerUi.setup(undefined, {
+      swaggerOptions: { url: "/api-docs/openapi/auth.yaml", persistAuthorization: false },
+      customCss: ".topbar { display: none }",
+    }),
+  );
 
   // Sensitive authenticated surfaces must never be cached by a shared
   // proxy or the browser back/forward cache. Applied early, before any

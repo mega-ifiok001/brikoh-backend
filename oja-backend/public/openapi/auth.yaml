@@ -1,0 +1,672 @@
+openapi: 3.1.0
+info:
+  title: Brikoh Authentication API
+  version: 1.0.0
+  description: |
+    Authentication, account lifecycle, invitation acceptance, and platform-admin
+    authentication endpoints. Examples use fake values and must be replaced with
+    credentials/tokens issued by the running environment.
+servers:
+  - url: /
+    description: Same origin as the API serving this specification
+tags:
+  - name: Merchant authentication
+  - name: Account security
+  - name: Staff invitations
+  - name: Platform admin authentication
+security: []
+paths:
+  /api/public/auth/register:
+    post:
+      tags: [Merchant authentication]
+      summary: Register an account
+      description: Creates an account and returns a session. Email verification is sent best-effort; an unverified account cannot complete onboarding.
+      operationId: registerAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+            example:
+              firstName: Ada
+              lastName: Okafor
+              phone: '+234 801 234 5678'
+              email: ada.okafor@example.com
+              password: TestPass123
+              confirmPassword: TestPass123
+      responses:
+        '201':
+          description: Account created and session issued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MerchantSession' }
+              example:
+                accessToken: eyJhbGciOi...fake-access-token
+                refreshToken: rt_fake-token-id.fake-secret
+                user:
+                  accountId: 8d40aa48-458b-4a61-90fd-e7567076dd00
+                  email: ada.okafor@example.com
+                  firstName: Ada
+                  lastName: Okafor
+                  phone: '+234 801 234 5678'
+                  role: null
+                  storeId: null
+                  storeName: null
+                  subdomain: null
+                  needsOnboarding: true
+                  verified: false
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '409': { $ref: '#/components/responses/ConflictError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/public/auth/login:
+    post:
+      tags: [Merchant authentication]
+      summary: Sign in with email and password
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+            example: { email: ada.okafor@example.com, password: TestPass123 }
+      responses:
+        '200':
+          description: Session created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MerchantSession' }
+              example:
+                accessToken: eyJhbGciOi...fake-access-token
+                refreshToken: rt_fake-token-id.fake-secret
+                user:
+                  accountId: 8d40aa48-458b-4a61-90fd-e7567076dd00
+                  email: ada.okafor@example.com
+                  firstName: Ada
+                  lastName: Okafor
+                  phone: '+234 801 234 5678'
+                  role: OWNER
+                  storeId: d35fc8ea-714c-4a5c-9679-2e002321a873
+                  storeName: Ada Market
+                  subdomain: ada-market
+                  needsOnboarding: false
+                  verified: true
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/public/auth/google:
+    post:
+      tags: [Merchant authentication]
+      summary: Sign in with a Google authorization code
+      description: Send the one-time authorization code received by the frontend callback and the exact registered redirect URI. A placeholder code cannot be used for a real Google sign-in.
+      operationId: googleSignIn
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, redirectUri]
+              properties:
+                code: { type: string, minLength: 1, example: google-auth-code-from-callback }
+                redirectUri: { type: string, minLength: 1, format: uri, example: https://app.example.com/auth/google/callback }
+            example: { code: google-auth-code-from-callback, redirectUri: 'https://app.example.com/auth/google/callback' }
+      responses:
+        '200':
+          description: Session created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MerchantSession' }
+              example:
+                accessToken: eyJhbGciOi...fake-access-token
+                refreshToken: rt_fake-token-id.fake-secret
+                user:
+                  accountId: 8d40aa48-458b-4a61-90fd-e7567076dd00
+                  email: ada.okafor@example.com
+                  firstName: Ada
+                  lastName: Okafor
+                  phone: null
+                  role: null
+                  storeId: null
+                  storeName: null
+                  subdomain: null
+                  needsOnboarding: true
+                  verified: true
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/public/auth/refresh:
+    post:
+      tags: [Merchant authentication]
+      summary: Rotate a merchant refresh token
+      description: The supplied refresh token is single-use. Save the newly returned pair and discard the old refresh token.
+      operationId: refreshSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+            example: { refreshToken: rt_fake-token-id.fake-secret }
+      responses:
+        '200':
+          description: Rotated session tokens
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accessToken, refreshToken]
+                properties:
+                  accessToken: { type: string }
+                  refreshToken: { type: string }
+              example: { accessToken: eyJhbGciOi...new-fake-access-token, refreshToken: rt_new-id.new-secret }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/public/auth/logout:
+    post:
+      tags: [Merchant authentication]
+      summary: Revoke a merchant refresh token
+      operationId: logout
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+            example: { refreshToken: rt_fake-token-id.fake-secret }
+      responses:
+        '204': { description: Session revoked; no response body }
+        '400': { $ref: '#/components/responses/ValidationError' }
+  /api/public/auth/verify:
+    post:
+      tags: [Account security]
+      summary: Verify an account email
+      description: Submit the single-use verification token from the email. Tokens start with vrf_.
+      operationId: verifyEmail
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, maxLength: 256, pattern: '^vrf_', example: vrf_fake-single-use-verification-token }
+            example: { token: vrf_fake-single-use-verification-token }
+      responses:
+        '200':
+          description: Email verified
+          content:
+            application/json:
+              schema: { type: object, properties: { verified: { type: boolean, const: true } }, required: [verified] }
+              example: { verified: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+  /api/public/auth/forgot-password:
+    post:
+      tags: [Account security]
+      summary: Request a password reset link
+      description: Always returns the same response for an existing or unknown address to prevent account discovery. A real reset token is delivered by email, expires after one hour, and is single-use.
+      operationId: requestPasswordReset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties: { email: { type: string, format: email, example: ada.okafor@example.com } }
+            example: { email: ada.okafor@example.com }
+      responses:
+        '202':
+          description: Request accepted (same response whether account exists or not)
+          content:
+            application/json:
+              schema: { type: object, required: [message], properties: { message: { type: string } } }
+              example: { message: 'If an account exists for that email, password reset instructions will be sent.' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/public/auth/reset-password:
+    post:
+      tags: [Account security]
+      summary: Set a new password using a reset token
+      description: The reset token is sent by email and starts with rst_. On success, all existing refresh sessions are revoked and the token cannot be reused.
+      operationId: resetPassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResetPasswordRequest' }
+            example: { token: rst_fake-single-use-reset-token, newPassword: NewPass456, confirmPassword: NewPass456 }
+      responses:
+        '200':
+          description: Password changed; sign in again
+          content:
+            application/json:
+              schema: { type: object, required: [ok, message], properties: { ok: { type: boolean, const: true }, message: { type: string } } }
+              example: { ok: true, message: 'Your password has been reset. Please sign in.' }
+        '400':
+          description: Invalid, expired, or already-used token, or invalid request data
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              example: { error: { code: PASSWORD_RESET_INVALID, message: 'This password reset link is invalid or has expired. Request a new one.' } }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/dashboard/resend-verification:
+    post:
+      tags: [Account security]
+      summary: Resend the signed-in account's verification email
+      operationId: resendVerification
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200':
+          description: Verification email request handled
+          content:
+            application/json:
+              schema: { type: object, properties: { sent: { type: boolean } } }
+              example: { sent: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/dashboard/onboarding:
+    post:
+      tags: [Merchant authentication]
+      summary: Create the signed-in account's business/store profile
+      description: Requires a valid bearer access token and a verified email. The store subdomain is derived by the server from name.
+      operationId: completeOnboarding
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OnboardingRequest' }
+            example:
+              name: Ada Market
+              businessType: RETAIL
+              location: Lagos, Nigeria
+              currency: NGN
+              businessPhone: '+234 801 234 5678'
+      responses:
+        '201':
+          description: Business profile created
+          content:
+            application/json:
+              schema: { type: object, required: [user], properties: { user: { $ref: '#/components/schemas/User' } } }
+              example:
+                user:
+                  accountId: 8d40aa48-458b-4a61-90fd-e7567076dd00
+                  email: ada.okafor@example.com
+                  firstName: Ada
+                  lastName: Okafor
+                  phone: '+234 801 234 5678'
+                  role: OWNER
+                  storeId: d35fc8ea-714c-4a5c-9679-2e002321a873
+                  storeName: Ada Market
+                  subdomain: ada-market
+                  needsOnboarding: false
+                  verified: true
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/dashboard/me:
+    get:
+      tags: [Merchant authentication]
+      summary: Get the signed-in account identity and permissions
+      operationId: getMe
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200':
+          description: Current account
+          content:
+            application/json:
+              schema: { allOf: [{ $ref: '#/components/schemas/User' }, { type: object, required: [permissions], properties: { permissions: { type: array, items: { type: string } } } }] }
+              example:
+                accountId: 8d40aa48-458b-4a61-90fd-e7567076dd00
+                email: ada.okafor@example.com
+                firstName: Ada
+                lastName: Okafor
+                phone: '+234 801 234 5678'
+                role: OWNER
+                storeId: d35fc8ea-714c-4a5c-9679-2e002321a873
+                storeName: Ada Market
+                subdomain: ada-market
+                needsOnboarding: false
+                verified: true
+                permissions: [all]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/dashboard/settings/password:
+    post:
+      tags: [Account security]
+      summary: Change password while signed in
+      operationId: changePassword
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChangePasswordRequest' }
+            example: { currentPassword: TestPass123, newPassword: NewPass456, confirmPassword: NewPass456 }
+      responses:
+        '200':
+          description: Password changed
+          content:
+            application/json:
+              schema: { type: object, required: [ok], properties: { ok: { type: boolean, const: true } } }
+              example: { ok: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/dashboard/account:
+    delete:
+      tags: [Account security]
+      summary: Delete the signed-in account
+      description: Permanently deletes the account and, for an owner, its store and tenant data. Verify the selected environment before invoking this operation.
+      operationId: deleteAccount
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200':
+          description: Account deleted
+          content:
+            application/json:
+              schema: { type: object, required: [ok], properties: { ok: { type: boolean, const: true } } }
+              example: { ok: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/public/auth/accept-invite:
+    post:
+      tags: [Staff invitations]
+      summary: Accept a staff invitation and set an account password
+      operationId: acceptStaffInvite
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password]
+              properties:
+                token: { type: string, minLength: 1, example: inv_fake-invitation-token }
+                password: { $ref: '#/components/schemas/Password' }
+            example: { token: inv_fake-invitation-token, password: StaffPass123 }
+      responses:
+        '201':
+          description: Invitation accepted
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+              example: { accepted: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+  /api/public/auth/accept-invite/{token}:
+    get:
+      tags: [Staff invitations]
+      summary: Preview a staff invitation
+      operationId: previewStaffInvite
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string, example: inv_fake-invitation-token }
+      responses:
+        '200':
+          description: Invitation details safe to show before acceptance
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+              example: { email: staff@example.com, storeName: Ada Market, role: STAFF, expiresAt: '2026-12-01T12:00:00.000Z' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+  /api/admin/auth/login:
+    post:
+      tags: [Platform admin authentication]
+      summary: Sign in to platform admin with password and TOTP
+      description: Admin authentication is separate from merchant authentication. Requires a six-digit authenticator-app code.
+      operationId: adminLogin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, password, totpToken]
+              properties:
+                email: { type: string, format: email, example: admin@example.com }
+                password: { type: string, minLength: 8, example: AdminPass123 }
+                totpToken: { type: string, pattern: '^\\d{6}$', example: '123456', description: Fake example only; enter current code from the admin authenticator app. }
+            example: { email: admin@example.com, password: AdminPass123, totpToken: '123456' }
+      responses:
+        '200':
+          description: Admin session created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminSession' }
+              example: { accessToken: eyJhbGciOi...fake-admin-access-token, refreshToken: rt_fake-admin-id.fake-secret, admin: { id: 1a1c59fd-d378-4f16-a834-b17f22991120, email: admin@example.com, roleName: SUPER_ADMIN } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/admin/auth/refresh:
+    post:
+      tags: [Platform admin authentication]
+      summary: Rotate platform-admin refresh token
+      operationId: adminRefresh
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+            example: { refreshToken: rt_fake-admin-id.fake-secret }
+      responses:
+        '200':
+          description: Rotated admin session
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminSession' }
+              example: { accessToken: eyJhbGciOi...new-fake-admin-token, refreshToken: rt_new-admin-id.new-secret, admin: { id: 1a1c59fd-d378-4f16-a834-b17f22991120, email: admin@example.com, roleName: SUPER_ADMIN } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/admin/auth/logout:
+    post:
+      tags: [Platform admin authentication]
+      summary: Revoke platform-admin refresh token
+      operationId: adminLogout
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+            example: { refreshToken: rt_fake-admin-id.fake-secret }
+      responses:
+        '204': { description: Admin session revoked; no response body }
+        '400': { $ref: '#/components/responses/ValidationError' }
+  /api/admin/auth/2fa/rotate:
+    post:
+      tags: [Platform admin authentication]
+      summary: Rotate the current admin's 2FA secret
+      description: The returned secret and otpauth URL are sensitive. Store the secret in an authenticator app and do not expose the response.
+      operationId: rotateAdminTwoFactor
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200':
+          description: New TOTP setup data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  email: { type: string, format: email }
+                  secret: { type: string }
+                  otpauthUrl: { type: string }
+              example: { email: admin@example.com, secret: FAKEEXAMPLEONLY, otpauthUrl: 'otpauth://totp/Brikoh:admin%40example.com?secret=FAKEEXAMPLEONLY&issuer=Brikoh' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/admin/auth/2fa/reset:
+    post:
+      tags: [Platform admin authentication]
+      summary: Reset another admin's 2FA (SUPER_ADMIN only)
+      description: This privileged break-glass action targets an admin by user UUID.
+      operationId: resetAdminTwoFactor
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [adminUserId]
+              properties: { adminUserId: { type: string, format: uuid, example: 1a1c59fd-d378-4f16-a834-b17f22991120 } }
+            example: { adminUserId: 1a1c59fd-d378-4f16-a834-b17f22991120 }
+      responses:
+        '200':
+          description: 2FA reset result
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+              example: { reset: true, adminUserId: 1a1c59fd-d378-4f16-a834-b17f22991120 }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/admin/me:
+    get:
+      tags: [Platform admin authentication]
+      summary: Get the current platform-admin identity
+      operationId: getAdminMe
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200':
+          description: Admin identity and authorization data
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+              example: { id: 1a1c59fd-d378-4f16-a834-b17f22991120, email: admin@example.com, roleName: SUPER_ADMIN }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Use the accessToken from the corresponding merchant or admin login response. Admin and merchant tokens are not interchangeable.
+  schemas:
+    Password:
+      type: string
+      minLength: 8
+      pattern: '^(?=.*[A-Za-z])(?=.*\\d).+$'
+      description: At least eight characters, with at least one letter and one digit.
+      example: TestPass123
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [firstName, lastName, phone, email, password, confirmPassword]
+      properties:
+        firstName: { type: string, minLength: 1, maxLength: 100, example: Ada }
+        lastName: { type: string, minLength: 1, maxLength: 100, example: Okafor }
+        phone: { type: string, minLength: 7, maxLength: 17, example: '+234 801 234 5678' }
+        email: { type: string, format: email, example: ada.okafor@example.com }
+        password: { $ref: '#/components/schemas/Password' }
+        confirmPassword: { type: string, minLength: 1, example: TestPass123 }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, example: ada.okafor@example.com }
+        password: { type: string, minLength: 1, example: TestPass123 }
+    RefreshRequest:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken: { type: string, minLength: 1, example: rt_fake-token-id.fake-secret }
+    ResetPasswordRequest:
+      type: object
+      required: [token, newPassword, confirmPassword]
+      properties:
+        token: { type: string, maxLength: 128, pattern: '^rst_', example: rst_fake-single-use-reset-token }
+        newPassword: { $ref: '#/components/schemas/Password' }
+        confirmPassword: { type: string, minLength: 1, example: NewPass456 }
+    ChangePasswordRequest:
+      type: object
+      required: [currentPassword, newPassword, confirmPassword]
+      properties:
+        currentPassword: { type: string, minLength: 1, example: TestPass123 }
+        newPassword: { $ref: '#/components/schemas/Password' }
+        confirmPassword: { type: string, minLength: 1, example: NewPass456 }
+    OnboardingRequest:
+      type: object
+      additionalProperties: false
+      required: [name, businessType, location, businessPhone]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120, pattern: '^[A-Za-z]+(?:\\s+[A-Za-z]+)*$', example: Ada Market }
+        businessType:
+          type: string
+          enum: [RETAIL, FOOD_AND_BEVERAGE, FASHION_AND_WEARABLES, HEALTH_AND_BEAUTY, ELECTRONICS, PROFESSIONAL_SERVICES, AGRICULTURE, OTHER]
+          example: RETAIL
+        location: { type: string, minLength: 2, maxLength: 120, example: Lagos, Nigeria }
+        currency: { type: string, enum: [NGN, USD, GHS, KES, ZAR], default: NGN, example: NGN }
+        businessPhone: { type: string, minLength: 7, maxLength: 17, example: '+234 801 234 5678' }
+        templateId: { type: string, format: uuid, example: 38d8a9fc-b809-4d82-9c8f-d8891b7eb12d }
+    User:
+      type: object
+      required: [accountId, email, firstName, lastName, phone, role, storeId, storeName, subdomain, needsOnboarding, verified]
+      properties:
+        accountId: { type: string, format: uuid }
+        email: { type: string, format: email }
+        firstName: { type: string }
+        lastName: { type: string }
+        phone: { type: [string, 'null'] }
+        role: { type: [string, 'null'], example: OWNER }
+        storeId: { type: [string, 'null'], format: uuid }
+        storeName: { type: [string, 'null'] }
+        subdomain: { type: [string, 'null'] }
+        needsOnboarding: { type: boolean }
+        verified: { type: boolean }
+    MerchantSession:
+      type: object
+      required: [accessToken, refreshToken, user]
+      properties:
+        accessToken: { type: string, description: Short-lived bearer JWT }
+        refreshToken: { type: string, description: Opaque rotating refresh token }
+        user: { $ref: '#/components/schemas/User' }
+    AdminSession:
+      type: object
+      required: [accessToken, refreshToken, admin]
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        admin:
+          type: object
+          required: [id, email, roleName]
+          properties:
+            id: { type: string, format: uuid }
+            email: { type: string, format: email }
+            roleName: { type: string, example: SUPER_ADMIN }
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: VALIDATION_ERROR }
+            message: { type: string, example: Request validation failed }
+            details: { type: [string, 'null'] }
+  responses:
+    ValidationError:
+      description: Request body failed validation
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: VALIDATION_ERROR, message: Request validation failed } }
+    Unauthorized:
+      description: Missing/invalid credentials, expired token, or invalid refresh token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: UNAUTHORIZED, message: Authentication required } }
+    Forbidden:
+      description: Authenticated account is not allowed to perform this action
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: VERIFICATION_REQUIRED, message: Verify your email before continuing } }
+    ConflictError:
+      description: Conflicting account state, such as an email already registered
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: EMAIL_TAKEN, message: An account with this email already exists } }
+    RateLimited:
+      description: Too many requests
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: RATE_LIMITED, message: Too many requests } }

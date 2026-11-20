@@ -13,6 +13,7 @@ import {
   createGoogleOAuthClient,
   type GoogleOAuthClient,
 } from "./google.js";
+import { ConsolePasswordResetSender, ResendPasswordResetSender } from "./email.js";
 import {
   changePassword,
   deleteAccount,
@@ -23,10 +24,16 @@ import {
   onboardAccount,
   refresh,
   register,
+  requestPasswordReset,
   resendVerification,
+  resetPassword,
   verifyEmail,
 } from "./service.js";
-import type { VerificationEmailSender, WelcomeEmailSender } from "./service.js";
+import type {
+  PasswordResetEmailSender,
+  VerificationEmailSender,
+  WelcomeEmailSender,
+} from "./service.js";
 
 /**
  * The wired verification-email channel. Tests run under NODE_ENV=test
@@ -40,6 +47,14 @@ function defaultVerificationSender(): VerificationEmailSender {
     return new ConsoleVerificationSender();
   }
   return new ResendVerificationSender(
+    createResendClient(env.RESEND_API_KEY),
+    env.RESEND_FROM_EMAIL_ACCOUNT,
+  );
+}
+
+function defaultPasswordResetSender(): PasswordResetEmailSender {
+  if (process.env.NODE_ENV === "test") return new ConsolePasswordResetSender();
+  return new ResendPasswordResetSender(
     createResendClient(env.RESEND_API_KEY),
     env.RESEND_FROM_EMAIL_ACCOUNT,
   );
@@ -144,6 +159,36 @@ export async function verifyHandler(
   try {
     const result = await verifyEmail(req.body?.token);
     res.status(200).json(result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** POST /api/public/auth/forgot-password */
+export async function forgotPasswordHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    await requestPasswordReset(req.body, defaultPasswordResetSender());
+    res.status(202).json({
+      message: "If an account exists for that email, password reset instructions will be sent.",
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** POST /api/public/auth/reset-password */
+export async function resetPasswordHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    await resetPassword(req.body);
+    res.status(200).json({ ok: true, message: "Your password has been reset. Please sign in." });
   } catch (err) {
     next(err);
   }

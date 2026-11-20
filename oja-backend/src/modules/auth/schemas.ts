@@ -93,6 +93,23 @@ export const verificationTokenSchema = z
   .min(1, "token is required")
   .max(256, "token is too long")
   .startsWith("vrf_", "token must start with vrf_");
+
+export const forgotPasswordSchema = z.object({ email: emailSchema });
+
+export const resetPasswordSchema = z
+  .object({
+    token: z
+      .string()
+      .min(1, "token is required")
+      .max(128, "token is too long")
+      .startsWith("rst_", "token is invalid"),
+    newPassword: passwordSchema,
+    confirmPassword: z.string().min(1, "Please confirm your password"),
+  })
+  .refine((data) => data.newPassword === data.confirmPassword, {
+    path: ["confirmPassword"],
+    message: "passwords do not match",
+  });
 export type VerificationTokenInput = z.infer<typeof verificationTokenSchema>;
 
 export const googleSignInSchema = z.object({

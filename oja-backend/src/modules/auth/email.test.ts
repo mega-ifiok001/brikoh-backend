@@ -6,6 +6,7 @@ vi.mock("resend", () => ({ Resend: resendMocks.Resend }));
 import { env } from "../../config/env.js";
 import type { VerificationEmailData } from "./service.js";
 import {
+  buildVerificationLink,
   buildVerificationEmail,
   buildWelcomeEmail,
   ConsoleVerificationSender,
@@ -27,10 +28,10 @@ describe("buildVerificationEmail (unit)", () => {
 
     expect(email.subject).toContain("Brikoh");
 
-    expect(email.html).toContain(`href="${env.FRONTEND_URL}/#/verify?token=${EMAIL_DATA.token}"`);
+    expect(email.html).toContain(`href="${buildVerificationLink(EMAIL_DATA.token)}"`);
     expect(email.html).toContain("Monday, August 10, 2026");
 
-    expect(email.text).toContain(`${env.FRONTEND_URL}/#/verify?token=${EMAIL_DATA.token}`);
+    expect(email.text).toContain(buildVerificationLink(EMAIL_DATA.token));
     expect(email.text).toContain("Monday, August 10, 2026");
   });
 
@@ -74,7 +75,7 @@ describe("ResendVerificationSender (unit)", () => {
         from: "verify@example.com",
         to: EMAIL_DATA.to,
         subject: expect.stringContaining("Brikoh"),
-        html: expect.stringContaining(`/verify?token=${EMAIL_DATA.token}`),
+        html: expect.stringContaining(`/verify-email?token=${EMAIL_DATA.token}`),
         text: expect.stringContaining(env.FRONTEND_URL),
       }),
     );
@@ -96,7 +97,7 @@ describe("ConsoleVerificationSender (unit)", () => {
     await new ConsoleVerificationSender().sendVerificationEmail(EMAIL_DATA);
 
     expect(logSpy).toHaveBeenCalledWith(
-      expect.stringContaining(`${env.FRONTEND_URL}/#/verify?token=${EMAIL_DATA.token}`),
+      expect.stringContaining(buildVerificationLink(EMAIL_DATA.token)),
     );
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("Monday, August 10, 2026"));
   });
