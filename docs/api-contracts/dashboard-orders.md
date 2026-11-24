@@ -32,15 +32,14 @@ assigned.
 Query parameters (all optional):
 
 - `status` — filter by `OrderStatus` (`PENDING | AWAITING_PAYMENT |
-  PAID | SHIPPED | CANCELLED | REFUNDED | FAILED`). `AWAITING_PAYMENT`
+PAID | SHIPPED | CANCELLED | REFUNDED | FAILED`). `AWAITING_PAYMENT`
   is specific to bank-transfer orders awaiting merchant confirmation
   (see below).
 - `paymentMethod` — filter by `CASH | TRANSFER | CREDIT | CARD` (POS
   sales only; storefront orders have no payment method).
 - `source` — filter by `OrderSource` (`STOREFRONT | POS | DIRECT |
-  SOCIAL | MARKETPLACE | REFERRAL`).
-- `start` / `end` — UTC ISO-8601 creation-time range (half-open like the
-  analytics endpoints: `createdAt >= start`, `createdAt < end`).
+SOCIAL | MARKETPLACE | REFERRAL`).
+- `date` — optional `YYYY-MM-DD`; filters orders to that UTC calendar day.
 - `q` — case-insensitive substring match on the customer's name or
   phone.
 - `customerId` — filter to one customer's orders (address-book
@@ -102,11 +101,11 @@ Status: `200`
 
 ### Error responses
 
-| Status | Code                 | Condition                         |
-| ------ | -------------------- | --------------------------------- |
-| `400`  | `VALIDATION_ERROR`   | Malformed query (bad range, bad `limit`, malformed `start`/`end`). |
-| `401`  | `UNAUTHORIZED`       | Missing, malformed, or expired token. |
-| `403`  | `INSUFFICIENT_PERMISSIONS` | Staff role without `orders.manage`. |
+| Status | Code                       | Condition                                                          |
+| ------ | -------------------------- | ------------------------------------------------------------------ |
+| `400`  | `VALIDATION_ERROR`         | Malformed query (bad range, bad `limit`, malformed `start`/`end`). |
+| `401`  | `UNAUTHORIZED`             | Missing, malformed, or expired token.                              |
+| `403`  | `INSUFFICIENT_PERMISSIONS` | Staff role without `orders.manage`.                                |
 
 Uniform error body shape (see `docs/api-contracts/README.md`).
 
@@ -181,11 +180,11 @@ Status: `200`
 
 ### Error responses
 
-| Status | Code               | Condition                              |
-| ------ | ------------------ | -------------------------------------- |
-| `401`  | `UNAUTHORIZED`     | Missing, malformed, or expired token.  |
-| `403`  | `INSUFFICIENT_PERMISSIONS` | Staff role without `orders.manage`. |
-| `404`  | `ORDER_NOT_FOUND`  | No such order in this store.           |
+| Status | Code                       | Condition                             |
+| ------ | -------------------------- | ------------------------------------- |
+| `401`  | `UNAUTHORIZED`             | Missing, malformed, or expired token. |
+| `403`  | `INSUFFICIENT_PERMISSIONS` | Staff role without `orders.manage`.   |
+| `404`  | `ORDER_NOT_FOUND`          | No such order in this store.          |
 
 Uniform error body shape (see `docs/api-contracts/README.md`).
 
@@ -212,7 +211,7 @@ success a `PAYMENT_RECEIVED` alert fires.
 Body:
 
 ```json
-{ "confirmedAmount": 1250.00 }
+{ "confirmedAmount": 1250.0 }
 ```
 
 `confirmedAmount` is optional; when omitted the order total is used.
@@ -224,14 +223,14 @@ now with `status: "PAID"` and `amountPaid` set.
 
 ### Error responses
 
-| Status | Code | Condition |
-| ------ | ---- | --------- |
-| `401`  | `UNAUTHORIZED` | Missing/invalid token |
-| `403`  | `INSUFFICIENT_PERMISSIONS` | Staff role without `orders.manage` |
-| `404`  | `ORDER_NOT_FOUND` | No such order in this store |
-| `422`  | `AMOUNT_MISMATCH` | The `confirmedAmount` does not equal `order.total` |
-| `409`  | `ORDER_NOT_AWAITING_PAYMENT` | Order is not in `AWAITING_PAYMENT` (already `PAID`, `PENDING`, etc.) |
-| `409`  | `CONFIRM_CONFLICT` | A concurrent confirm or the expiry sweep already moved the order (race-safe — exactly one transition wins) |
+| Status | Code                         | Condition                                                                                                  |
+| ------ | ---------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `401`  | `UNAUTHORIZED`               | Missing/invalid token                                                                                      |
+| `403`  | `INSUFFICIENT_PERMISSIONS`   | Staff role without `orders.manage`                                                                         |
+| `404`  | `ORDER_NOT_FOUND`            | No such order in this store                                                                                |
+| `422`  | `AMOUNT_MISMATCH`            | The `confirmedAmount` does not equal `order.total`                                                         |
+| `409`  | `ORDER_NOT_AWAITING_PAYMENT` | Order is not in `AWAITING_PAYMENT` (already `PAID`, `PENDING`, etc.)                                       |
+| `409`  | `CONFIRM_CONFLICT`           | A concurrent confirm or the expiry sweep already moved the order (race-safe — exactly one transition wins) |
 
 ### POST /api/dashboard/orders/:orderId/reject-payment
 
@@ -244,11 +243,11 @@ The `OrderDetail`, now `status: "PENDING"`.
 
 ### Error responses
 
-| Status | Code | Condition |
-| ------ | ---- | --------- |
-| `401`  | `UNAUTHORIZED` | Missing/invalid token |
-| `403`  | `INSUFFICIENT_PERMISSIONS` | Staff role without `orders.manage` |
-| `404`  | `ORDER_NOT_FOUND` | No such order in this store |
+| Status | Code                         | Condition                          |
+| ------ | ---------------------------- | ---------------------------------- |
+| `401`  | `UNAUTHORIZED`               | Missing/invalid token              |
+| `403`  | `INSUFFICIENT_PERMISSIONS`   | Staff role without `orders.manage` |
+| `404`  | `ORDER_NOT_FOUND`            | No such order in this store        |
 | `409`  | `ORDER_NOT_AWAITING_PAYMENT` | Order is not in `AWAITING_PAYMENT` |
 
 ## Bank-transfer auto-expiry sweep

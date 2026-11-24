@@ -718,11 +718,9 @@ export async function listOrders(storeId: string, params: ListOrdersParams): Pro
   if (params.status !== undefined) where.status = params.status;
   if (params.paymentMethod !== undefined) where.paymentMethod = params.paymentMethod;
   if (params.source !== undefined) where.source = params.source;
-  if (params.start !== undefined || params.end !== undefined) {
-    const range: Prisma.DateTimeFilter = {};
-    if (params.start !== undefined) range.gte = new Date(params.start);
-    if (params.end !== undefined) range.lt = new Date(params.end);
-    where.createdAt = range;
+  if (params.date !== undefined) {
+    const start = new Date(`${params.date}T00:00:00.000Z`);
+    where.createdAt = { gte: start, lt: new Date(start.getTime() + 86_400_000) };
   }
   if (params.cursor !== undefined) where.id = { lt: params.cursor };
   if (params.customerId !== undefined) where.customerId = params.customerId;

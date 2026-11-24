@@ -51,14 +51,13 @@ export interface ListStoreActivityResult {
 
 /**
  * Reads the tenant's activity log, newest first, cursor-paginated.
- * `start`/`end` are inclusive/exclusive UTC bounds on createdAt
- * (end-of-day should be sent as the next day's midnight).
+ * `date` selects one UTC calendar day on createdAt.
  */
 export async function listStoreActivity(
   storeId: string,
   input: unknown,
 ): Promise<ListStoreActivityResult> {
-  const { limit, cursor, staffMemberId, start, end } = validateOrThrow(
+  const { limit, cursor, staffMemberId, date } = validateOrThrow(
     listStoreActivityParamsSchema,
     input,
   ) as ListStoreActivityParams;
@@ -77,12 +76,11 @@ export async function listStoreActivity(
   const where: Prisma.StoreActivityLogWhereInput = {
     storeId,
     ...(staffMemberId !== undefined ? { staffMemberId } : {}),
-    // Built in one object — separate spreads would clobber each other.
-    ...(start !== undefined || end !== undefined
+    ...(date !== undefined
       ? {
           createdAt: {
-            ...(start !== undefined ? { gte: new Date(start) } : {}),
-            ...(end !== undefined ? { lt: new Date(end) } : {}),
+            gte: new Date(`${date}T00:00:00.000Z`),
+            lt: new Date(new Date(`${date}T00:00:00.000Z`).getTime() + 86_400_000),
           },
         }
       : {}),

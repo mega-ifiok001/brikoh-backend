@@ -166,8 +166,14 @@ export const listOrdersParamsSchema = z.object({
     .optional(),
   paymentMethod: z.enum(["CASH", "TRANSFER", "CREDIT", "CARD"]).optional(),
   source: z.enum(["STOREFRONT", "POS"]).optional(),
-  start: z.iso.datetime({ offset: true }).optional(),
-  end: z.iso.datetime({ offset: true }).optional(),
+  date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "date must use YYYY-MM-DD format")
+    .refine((value) => {
+      const parsed = new Date(`${value}T00:00:00.000Z`);
+      return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+    }, "date must be a valid calendar date")
+    .optional(),
   q: z
     .string()
     .trim()

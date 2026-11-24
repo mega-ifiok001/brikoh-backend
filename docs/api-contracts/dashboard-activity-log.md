@@ -17,11 +17,11 @@ by construction.
 ## Request
 
 Query params:
+
 - `limit: number — optional, default 50, min 1, max 200`
 - `cursor: string (activity entry id) — optional; the first entry after the cursor`
 - `staffMemberId: string — optional; only entries attributed to this staff member`
-- `start: string — optional, UTC ISO-8601 datetime; only entries at or after this instant`
-- `end: string — optional, UTC ISO-8601 datetime; only entries strictly before this instant (send end-of-day as the next day's midnight)`
+- `date: string — optional, YYYY-MM-DD; only entries from that UTC calendar day`
 
 ## Success response
 
@@ -47,37 +47,37 @@ Entries are ordered by `createdAt DESC, id DESC` (stable under inserts).
 
 ## Actions
 
-| Action                 | detail                                            |
-| ---------------------- | ------------------------------------------------- |
-| `product.created`      | productId, name, variantCount                     |
-| `product.updated`      | productId, name, updatedFields                    |
-| `product.deleted`      | productId                                         |
-| `product.published`    | productId, name                                   |
-| `product.unpublished`  | productId, name                                   |
-| `bulk.imported`        | importId, created, overwritten, skipped, failed   |
-| `stock.adjusted`       | productId, productName, branchId, branchName, variantId (null), variantName (null), quantityChange, reason |
-| `stock.sale`           | same as stock.adjusted (webhook-driven, staffMemberId always null) |
-| `stock.transferred`    | productId, variantId (null), sourceBranchId, destinationBranchId, quantity |
-| `branch.created`       | branchId, name                                    |
-| `branch.updated`       | branchId, previousName                            |
-| `branch.default_changed` | branchId                                         |
-| `branch.deleted`       | branchId                                          |
-| `catalog.category.created` | categoryId, name                              |
-| `catalog.category.updated` | categoryId, updatedFields                     |
-| `catalog.category.deleted` | categoryId                                    |
-| `catalog.unit.created` | unitId, name                                      |
-| `catalog.unit.updated` | unitId, updatedFields                             |
-| `catalog.unit.deleted` | unitId                                            |
-| `staff.joined`         | staffMemberId, email, role                        |
-| `staff.role.updated`   | staffMemberId, email, from, to                    |
-| `staff.removed`        | staffMemberId, email                              |
+| Action                     | detail                                                                                                     |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `product.created`          | productId, name, variantCount                                                                              |
+| `product.updated`          | productId, name, updatedFields                                                                             |
+| `product.deleted`          | productId                                                                                                  |
+| `product.published`        | productId, name                                                                                            |
+| `product.unpublished`      | productId, name                                                                                            |
+| `bulk.imported`            | importId, created, overwritten, skipped, failed                                                            |
+| `stock.adjusted`           | productId, productName, branchId, branchName, variantId (null), variantName (null), quantityChange, reason |
+| `stock.sale`               | same as stock.adjusted (webhook-driven, staffMemberId always null)                                         |
+| `stock.transferred`        | productId, variantId (null), sourceBranchId, destinationBranchId, quantity                                 |
+| `branch.created`           | branchId, name                                                                                             |
+| `branch.updated`           | branchId, previousName                                                                                     |
+| `branch.default_changed`   | branchId                                                                                                   |
+| `branch.deleted`           | branchId                                                                                                   |
+| `catalog.category.created` | categoryId, name                                                                                           |
+| `catalog.category.updated` | categoryId, updatedFields                                                                                  |
+| `catalog.category.deleted` | categoryId                                                                                                 |
+| `catalog.unit.created`     | unitId, name                                                                                               |
+| `catalog.unit.updated`     | unitId, updatedFields                                                                                      |
+| `catalog.unit.deleted`     | unitId                                                                                                     |
+| `staff.joined`             | staffMemberId, email, role                                                                                 |
+| `staff.role.updated`       | staffMemberId, email, from, to                                                                             |
+| `staff.removed`            | staffMemberId, email                                                                                       |
 
 ## Error responses
 
-| Status | Code               | Condition                                        |
-| ------ | ------------------ | ------------------------------------------------ |
-| `400`  | `VALIDATION_ERROR` | Invalid limit/cursor/dates (cursor must exist; ISO datetimes must carry an offset) |
-| `401`  | `UNAUTHORIZED`     | Missing/invalid token, or no store association   |
-| `403`  | `INSUFFICIENT_PERMISSIONS` | Authenticated but not the store owner     |
+| Status | Code                       | Condition                                                                          |
+| ------ | -------------------------- | ---------------------------------------------------------------------------------- |
+| `400`  | `VALIDATION_ERROR`         | Invalid limit/cursor/dates (cursor must exist; ISO datetimes must carry an offset) |
+| `401`  | `UNAUTHORIZED`             | Missing/invalid token, or no store association                                     |
+| `403`  | `INSUFFICIENT_PERMISSIONS` | Authenticated but not the store owner                                              |
 
 Uniform error body shape (see `docs/api-contracts/README.md`).
