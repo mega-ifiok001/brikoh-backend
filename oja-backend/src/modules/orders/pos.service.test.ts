@@ -733,7 +733,7 @@ describe("listOrders (unit)", () => {
     };
   }
 
-  it("passes filters through to the query (status, method, source, range, q, cursor)", async () => {
+  it("passes filters through to the query (status, method, source, date, q, cursor)", async () => {
     prisma.order.findMany.mockResolvedValue([orderRow()]);
     prismaMocks.getPrismaClient.mockReturnValue(prisma);
 
@@ -741,8 +741,7 @@ describe("listOrders (unit)", () => {
       status: "PAID",
       paymentMethod: "CASH",
       source: "POS",
-      start: "2026-08-01T00:00:00.000Z",
-      end: "2026-08-13T00:00:00.000Z",
+      date: "2026-08-12",
       q: "ade",
       cursor: "order-9",
       limit: 20,
@@ -756,11 +755,11 @@ describe("listOrders (unit)", () => {
           status: "PAID",
           paymentMethod: "CASH",
           source: "POS",
-          id: { lt: "order-9" },
           createdAt: {
-            gte: new Date("2026-08-01T00:00:00.000Z"),
+            gte: new Date("2026-08-12T00:00:00.000Z"),
             lt: new Date("2026-08-13T00:00:00.000Z"),
           },
+          id: { lt: "order-9" },
           customer: {
             OR: [
               { name: { contains: "ade", mode: "insensitive" } },
