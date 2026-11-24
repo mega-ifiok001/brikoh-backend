@@ -6,6 +6,9 @@ import {
   forgotPasswordHandler,
   googleSignInHandler,
   loginHandler,
+  pinLoginHandler,
+  pinStatusHandler,
+  setPinHandler,
   logoutHandler,
   meHandler,
   onboardingHandler,
@@ -21,6 +24,7 @@ const authRouter: Router = Router();
 
 authRouter.post("/register", rateLimit({ windowMs: 60_000, max: 10 }), registerHandler);
 authRouter.post("/login", loginHandler);
+authRouter.post("/pin-login", rateLimit({ windowMs: 60_000, max: 10 }), pinLoginHandler);
 authRouter.post("/google", googleSignInHandler);
 authRouter.post("/refresh", refreshHandler);
 authRouter.post("/logout", logoutHandler);
@@ -48,6 +52,10 @@ dashboardMeRouter.get("/", meHandler);
 const dashboardPasswordRouter: Router = Router();
 dashboardPasswordRouter.post("/", changePasswordHandler);
 
+const dashboardPinRouter: Router = Router();
+dashboardPinRouter.get("/", pinStatusHandler);
+dashboardPinRouter.put("/", rateLimit({ windowMs: 60_000, max: 10 }), setPinHandler);
+
 const dashboardAccountRouter: Router = Router();
 dashboardAccountRouter.delete("/", deleteAccountHandler);
 
@@ -68,6 +76,7 @@ export {
   dashboardAccountRouter,
   dashboardMeRouter,
   dashboardPasswordRouter,
+  dashboardPinRouter,
   onboardingRouter,
   resendVerificationRouter,
 };

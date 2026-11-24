@@ -296,8 +296,20 @@ model Account {
   refreshTokens        RefreshToken[]
   otpChallenges       OtpChallenge[]
   passwordResetTokens  PasswordResetToken[]
+  pinCredential       AccountPinCredential?
   supportTicketsRaised SupportTicket[]            @relation("TicketRaisedBy")
   ticketMessages       TicketMessage[]            @relation("TicketMessageAccountAuthor")
+}
+
+// Six-digit account PIN for mobile sign-in. Never store the PIN itself.
+model AccountPinCredential {
+  id             String    @id @default(uuid(7)) @db.Uuid
+  accountId      String    @unique @db.Uuid
+  account        Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  pinHash        String
+  failedAttempts Int       @default(0)
+  lockedUntil    DateTime? @db.Timestamptz(3)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(3)
 }
 
 // Purpose-bound email OTP challenges. Only an HMAC digest of the 6-digit code

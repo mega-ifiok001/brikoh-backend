@@ -37,6 +37,7 @@ import {
   dashboardAccountRouter,
   dashboardMeRouter,
   dashboardPasswordRouter,
+  dashboardPinRouter,
   onboardingRouter,
   resendVerificationRouter,
 } from "./src/modules/auth/routes.js";
@@ -208,6 +209,7 @@ export function createApp(): Express {
     rateLimit({ windowMs: 60_000, max: 300 }),
     dashboardPasswordRouter,
   );
+  app.use("/api/dashboard/settings/pin", authenticate, rateLimit({ windowMs: 60_000, max: 300 }), dashboardPinRouter);
   app.use(
     "/api/dashboard/account",
     authenticate,
