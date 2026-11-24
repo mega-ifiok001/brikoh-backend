@@ -13,12 +13,12 @@ are UTC ISO-8601.
 The trust level is `analytics.manage` — the same permission that gates
 the analytics surface — because whoever is trusted to see the store's
 revenue and profit is the person who should be recording what affects
-it. There is no separate `viewProfit` requirement to *write* expenses.
+it. There is no separate `viewProfit` requirement to _write_ expenses.
 
 ## Expense model
 
 - `category` — one of `RENT | TRANSPORT | PACKAGING | SALARIES |
-  MARKETING | UTILITIES | OTHER`.
+MARKETING | UTILITIES | OTHER`.
 - `amount` — `0 < amount <= 99999999.99`, 2 dp.
 - `description` — optional free text (max 500 chars).
 - `date` — the calendar day the expense belongs to (UTC date, sent as a
@@ -37,11 +37,15 @@ actions).
 Query parameters (all optional):
 
 - `category` — filter to one category.
-- `from` / `to` — inclusive `YYYY-MM-DD` range on `date` (`from <= to`).
+- `date` — exact `YYYY-MM-DD` calendar date on which the expense was recorded.
 - `limit` — `1..100`, default `50`.
 - `cursor` — the last `id` of the previous page (uuidv7 ids are
   time-ordered, so `id < cursor` gives the next older page); omitted
   starts at the newest.
+
+Example: `GET /api/dashboard/expenses?date=2026-08-17` returns only expenses
+whose `date` is August 17, 2026 (UTC calendar date). Interval filters are not
+accepted.
 
 ### Success response
 
@@ -109,10 +113,10 @@ expenses, unlike ledgers).
 
 ## Error responses
 
-| Status | Code | Condition |
-| ------ | ---- | --------- |
-| `400`  | `VALIDATION_ERROR` | Invalid input (bad amount, unknown category, bad date, `from > to`, empty PUT) |
-| `401`  | `UNAUTHORIZED` | Missing/invalid bearer token |
-| `403`  | `INSUFFICIENT_PERMISSIONS` | Authenticated staff without `analytics.manage` |
-| `404`  | `EXPENSE_NOT_FOUND` | `expenseId` does not exist in this store |
-| `429`  | `RATE_LIMITED` | — |
+| Status | Code                       | Condition                                                                                                 |
+| ------ | -------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `400`  | `VALIDATION_ERROR`         | Invalid input (bad amount, unknown category, invalid date, empty PUT, or unsupported interval parameters) |
+| `401`  | `UNAUTHORIZED`             | Missing/invalid bearer token                                                                              |
+| `403`  | `INSUFFICIENT_PERMISSIONS` | Authenticated staff without `analytics.manage`                                                            |
+| `404`  | `EXPENSE_NOT_FOUND`        | `expenseId` does not exist in this store                                                                  |
+| `429`  | `RATE_LIMITED`             | —                                                                                                         |

@@ -7,29 +7,15 @@ export { validateOrThrow } from "../../lib/validate.js";
  * ============================================================
  * REPORTS SCHEMAS
  * ============================================================
- * Reports accept either a calendar date (`date=YYYY-MM-DD`) or an inclusive
- * calendar range (`startDate` + `endDate`). Calendar dates are UTC dates; the
- * end date is expanded to the next midnight so filtering remains [start, end).
- * The former `start` + `end` UTC timestamp contract remains supported.
+ * Reports take one calendar date (`date=YYYY-MM-DD`). It is interpreted in
+ * UTC and expanded to that day's half-open midnight-to-midnight interval.
  * ============================================================
  */
 
-const utcDateSchema = z
-  .string()
-  .trim()
-  .refine((value) => !Number.isNaN(Date.parse(value)), "Enter a valid date and time.")
-  .refine(
-    (value) => /(Z|[+-]00:00)$/.test(value),
-    "Dates must be in UTC (include a 'Z' or '+00:00' offset).",
-  );
-
-const reportRangeSchema = z.object({ start: utcDateSchema, end: utcDateSchema });
-
 export interface ParsedReportRange {
+  date: string;
   start: Date;
   end: Date;
-  /** Inclusive YYYY-MM-DD boundaries when the calendar-date API is used. */
-  dates?: { startDate: string; endDate: string };
 }
 
 const calendarDateSchema = z
@@ -45,75 +31,27 @@ function utcMidnight(date: string): Date {
 }
 
 /**
- * Validates `?start=&end=` and returns normalized Date boundaries. Missing
- * dates, malformed/non-UTC dates, and a reversed range all throw
- * `400 INVALID_RANGE` with a clear message.
+ * Validates `?date=YYYY-MM-DD` and returns the selected day's UTC boundaries.
  */
 export function parseReportRange(query: unknown): ParsedReportRange {
   const raw = (typeof query === "object" && query !== null ? query : {}) as Record<string, unknown>;
-  const hasDate = "date" in raw;
-  const hasStartDate = "startDate" in raw;
-  const hasEndDate = "endDate" in raw;
-  const hasCalendarParams = hasDate || hasStartDate || hasEndDate;
-  const hasTimestampParams = "start" in raw || "end" in raw;
+  if (Object.keys(raw).some((key) => key !== "date")) {
+    throw new AppError(400, "INVALID_RANGE", "Only the date query parameter is supported.");
+  }
   const date = typeof raw.date === "string" ? raw.date.trim() : "";
-  const startDate = typeof raw.startDate === "string" ? raw.startDate.trim() : "";
-  const endDate = typeof raw.endDate === "string" ? raw.endDate.trim() : "";
-
-  if (hasCalendarParams) {
-    if (hasTimestampParams) {
-      throw new AppError(400, "INVALID_RANGE", "Use calendar dates or timestamps, not both.");
-    }
-    if (hasDate && (hasStartDate || hasEndDate)) {
-      throw new AppError(
-        400,
-        "INVALID_RANGE",
-        "Provide either one date or a start date and end date, not both.",
-      );
-    }
-    const startRaw = hasDate ? date : startDate;
-    const endRaw = hasDate ? date : endDate;
-    if (startRaw === "" || endRaw === "") {
-      throw new AppError(400, "INVALID_RANGE", "Please provide both a start date and end date.");
-    }
-    const parsedDates = z
-      .object({ startDate: calendarDateSchema, endDate: calendarDateSchema })
-      .safeParse({ startDate: startRaw, endDate: endRaw });
-    if (!parsedDates.success) {
-      const message = parsedDates.error.issues[0]?.message ?? "Enter a valid date range.";
-      throw new AppError(400, "INVALID_RANGE", message);
-    }
-    if (parsedDates.data.startDate > parsedDates.data.endDate) {
-      throw new AppError(400, "INVALID_RANGE", "The start date must be on or before the end date.");
-    }
-    const exclusiveEnd = utcMidnight(parsedDates.data.endDate);
-    exclusiveEnd.setUTCDate(exclusiveEnd.getUTCDate() + 1);
-    return {
-      start: utcMidnight(parsedDates.data.startDate),
-      end: exclusiveEnd,
-      dates: parsedDates.data,
-    };
+  if (date === "") {
+    throw new AppError(400, "INVALID_RANGE", "Please provide a date in YYYY-MM-DD format.");
   }
 
-  const startRaw = typeof raw.start === "string" ? raw.start.trim() : "";
-  const endRaw = typeof raw.end === "string" ? raw.end.trim() : "";
-  if (startRaw === "" || endRaw === "") {
-    throw new AppError(400, "INVALID_RANGE", "Please provide both a start and end date.");
-  }
-
-  const parsed = reportRangeSchema.safeParse({ start: startRaw, end: endRaw });
+  const parsed = calendarDateSchema.safeParse(date);
   if (!parsed.success) {
-    const message = parsed.error.issues[0]?.message ?? "Enter a valid date range.";
-    const detail = parsed.error.issues
-      .map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`)
-      .join("; ");
-    throw new AppError(400, "INVALID_RANGE", message, detail);
+    throw new AppError(
+      400,
+      "INVALID_RANGE",
+      parsed.error.issues[0]?.message ?? "Enter a valid date.",
+    );
   }
-
-  const start = new Date(parsed.data.start);
-  const end = new Date(parsed.data.end);
-  if (start.getTime() >= end.getTime()) {
-    throw new AppError(400, "INVALID_RANGE", "The start date must be before the end date.");
-  }
-  return { start, end };
+  const start = utcMidnight(parsed.data);
+  const end = new Date(start.getTime() + 86_400_000);
+  return { date: parsed.data, start, end };
 }

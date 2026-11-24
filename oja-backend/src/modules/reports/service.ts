@@ -33,13 +33,8 @@ export type ReportsDb = Pick<
   "order" | "orderLineItem" | "product" | "expense" | "productVariant" | "branchStock"
 >;
 
-export interface ReportRangeView {
-  start: string;
-  end: string;
-}
-
 export interface PnlView {
-  range: ReportRangeView;
+  date: string;
   revenue: string;
   cogs: string;
   expenses: string;
@@ -54,7 +49,7 @@ export interface CategoryTotal {
 }
 
 export interface ExpensesByCategoryView {
-  range: ReportRangeView;
+  date: string;
   categories: CategoryTotal[];
   grandTotal: string;
 }
@@ -102,7 +97,7 @@ export class ReportsService {
     const netProfit = revenue.sub(cogs).sub(expenses);
 
     return {
-      range: { start: start.toISOString(), end: end.toISOString() },
+      date: start.toISOString().slice(0, 10),
       revenue: revenue.toFixed(2),
       cogs: cogs.toFixed(2),
       expenses: expenses.toFixed(2),
@@ -134,7 +129,7 @@ export class ReportsService {
     const grandTotal = categories.reduce((sum, row) => sum.add(row.total), new Prisma.Decimal(0));
 
     return {
-      range: { start: start.toISOString(), end: end.toISOString() },
+      date: start.toISOString().slice(0, 10),
       categories,
       grandTotal: grandTotal.toFixed(2),
     };
@@ -145,8 +140,7 @@ export class ReportsService {
     const pnl = await this.getPnl(storeId, start, end);
     return [
       {
-        start: pnl.range.start,
-        end: pnl.range.end,
+        date: pnl.date,
         revenue: pnl.revenue,
         cogs: pnl.cogs,
         expenses: pnl.expenses,
@@ -157,7 +151,11 @@ export class ReportsService {
   }
 
   /** CSV row set for the by-category export (one row per category). */
-  async categoryCsvRows(storeId: string, start: Date, end: Date): Promise<Record<string, string>[]> {
+  async categoryCsvRows(
+    storeId: string,
+    start: Date,
+    end: Date,
+  ): Promise<Record<string, string>[]> {
     const view = await this.getExpensesByCategory(storeId, start, end);
     return view.categories.map((row) => ({
       category: row.category,
@@ -185,7 +183,11 @@ export class ReportsService {
     // count: a retired variant's stock is not part of the sellable
     // inventory valuation.
     const activeVariants = await this.db.productVariant.findMany({
-      where: { storeId, productId: { in: products.map((product) => product.id) }, archivedAt: null },
+      where: {
+        storeId,
+        productId: { in: products.map((product) => product.id) },
+        archivedAt: null,
+      },
       select: { id: true },
     });
     const variantStock = await this.db.branchStock.groupBy({

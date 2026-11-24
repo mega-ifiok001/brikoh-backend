@@ -39,28 +39,27 @@ export interface AnalyticsRange {
 }
 
 export interface SalesSummary {
-  range: { start: string; end: string };
+  date: string;
   totalSales: string;
   orderCount: number;
   bestSellers: { productId: string; name: string; units: number; revenue: string }[];
 }
 
 export interface BucketDto {
-  start: string;
-  end: string;
+  date: string;
   totalSales: string;
   orderCount: number;
 }
 
 export interface TimeseriesView {
-  range: { start: string; end: string };
+  date: string;
   granularity: Granularity;
   buckets: BucketDto[];
 }
 
 export interface SalesTrendsView extends TimeseriesView {
   totals: { totalSales: string; orderCount: number };
-  previousPeriod: { start: string; end: string; totalSales: string; orderCount: number };
+  previousPeriod: { date: string; totalSales: string; orderCount: number };
   changePercent: number | null;
 }
 
@@ -72,7 +71,7 @@ export interface StaffPerformanceRow {
 }
 
 export interface StaffPerformanceView {
-  range: { start: string; end: string };
+  date: string;
   staff: StaffPerformanceRow[];
 }
 
@@ -83,7 +82,7 @@ export interface ChannelRow {
 }
 
 export interface ChannelsView {
-  range: { start: string; end: string };
+  date: string;
   channels: ChannelRow[];
 }
 
@@ -95,14 +94,13 @@ function salesWhere(storeId: string, range: AnalyticsRange) {
   };
 }
 
-function serializeRange(range: AnalyticsRange): { start: string; end: string } {
-  return { start: range.start.toISOString(), end: range.end.toISOString() };
+function serializeDate(range: AnalyticsRange): string {
+  return range.start.toISOString().slice(0, 10);
 }
 
 function serializeBuckets(buckets: readonly BucketTotals[]): BucketDto[] {
   return buckets.map((bucket) => ({
-    start: bucket.start.toISOString(),
-    end: bucket.end.toISOString(),
+    date: bucket.start.toISOString().slice(0, 10),
     totalSales: bucket.totalSales.toFixed(2),
     orderCount: bucket.orderCount,
   }));
@@ -160,7 +158,7 @@ export class AnalyticsService {
       .map((entry) => ({ ...entry, revenue: entry.revenue.toFixed(2) }));
 
     return {
-      range: serializeRange(range),
+      date: serializeDate(range),
       totalSales: (agg._sum.total ?? new Prisma.Decimal(0)).toFixed(2),
       orderCount,
       bestSellers,
@@ -179,7 +177,7 @@ export class AnalyticsService {
     });
 
     return {
-      range: serializeRange(range),
+      date: serializeDate(range),
       granularity,
       buckets: serializeBuckets(bucketOrders(orders, range.start, range.end, granularity)),
     };
@@ -212,12 +210,11 @@ export class AnalyticsService {
     const previousTotal = sumOrders(previousOrders);
 
     return {
-      range: serializeRange(range),
+      date: serializeDate(range),
       granularity,
       totals: { totalSales: currentTotal.toFixed(2), orderCount: currentOrders.length },
       previousPeriod: {
-        start: previousStart.toISOString(),
-        end: previousEnd.toISOString(),
+        date: previousStart.toISOString().slice(0, 10),
         totalSales: previousTotal.toFixed(2),
         orderCount: previousOrders.length,
       },
@@ -314,7 +311,7 @@ export class AnalyticsService {
         ),
       );
 
-    return { range: serializeRange(range), staff };
+    return { date: serializeDate(range), staff };
   }
 
   /** Revenue-by-channel breakdown over successful sales (advanced tier). */
@@ -335,7 +332,7 @@ export class AnalyticsService {
     );
 
     return {
-      range: serializeRange(range),
+      date: serializeDate(range),
       channels: CHANNELS.map((source) => {
         const group = bySource.get(source);
         return {

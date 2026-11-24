@@ -7,13 +7,11 @@ Rate-limited: no
 
 Base path: `/api/dashboard/analytics`
 
-All five endpoints share the same range semantics:
+All five endpoints use one query parameter: `date=YYYY-MM-DD`. The date is a
+real UTC calendar date. Each endpoint includes records from midnight on that
+date up to (but not including) midnight the next day. `start`/`end` ranges
+and weekly granularity are no longer accepted.
 
-- `start` and `end` are required, UTC ISO-8601 timestamps (must carry a
-  `Z` or `+00:00` offset — local-timezone offsets are rejected).
-- The range is half-open: `createdAt >= start` AND `createdAt < end`
-  (an order exactly at `end` is excluded; exactly at `start` is included).
-- A range may span at most 366 days.
 - All money values are returned as strings (`Decimal.toFixed(2)`), never
   floats.
 - Every aggregation counts only **successful sales**: orders whose status
@@ -26,18 +24,17 @@ Tier: Basic — available on every tier, including stores with no
 subscription.
 
 Query params:
-- `start: string (UTC ISO-8601) — range start, inclusive — required`
-- `end: string (UTC ISO-8601) — range end, exclusive — required`
+
+- `date: string (YYYY-MM-DD) — selected UTC calendar day — required`
 - `top: integer 1..50 — number of best sellers to return (default 5)`
+
+Example: `GET /api/dashboard/analytics/summary?date=2026-08-03`
 
 Success response — Status: `200`
 
 ```json
 {
-  "range": {
-    "start": "2026-08-01T00:00:00.000Z",
-    "end": "2026-08-08T00:00:00.000Z"
-  },
+  "date": "2026-08-03",
   "totalSales": "1250.50",
   "orderCount": 3,
   "bestSellers": [
@@ -53,9 +50,9 @@ Success response — Status: `200`
 
 `bestSellers` are ranked by `revenue` descending, then `name` ascending
 (deterministic tie-breaker). `units` is the sum of line-item quantities
-across successful sales in the range; `revenue` is the sum of
+across successful sales on the selected date; `revenue` is the sum of
 `quantity × unitPriceAtPurchase` (prices captured at purchase time, never
-re-read from the product). A range with no orders returns
+re-read from the product). A date with no orders returns
 `totalSales: "0.00"`, `orderCount: 0`, `bestSellers: []`.
 
 ## GET /api/dashboard/analytics/timeseries
@@ -64,22 +61,21 @@ Tier: Basic — available on every tier, including stores with no
 subscription.
 
 Query params:
-- `start`, `end` — as above.
-- `granularity: "daily" | "weekly"` (default `daily`)
+
+- `date` — as above.
+- `granularity: "daily"` (optional; daily is the only supported granularity)
+
+Example: `GET /api/dashboard/analytics/timeseries?date=2026-08-03`
 
 Success response — Status: `200`
 
 ```json
 {
-  "range": {
-    "start": "2026-08-01T00:00:00.000Z",
-    "end": "2026-08-08T00:00:00.000Z"
-  },
+  "date": "2026-08-03",
   "granularity": "daily",
   "buckets": [
     {
-      "start": "2026-08-01T00:00:00.000Z",
-      "end": "2026-08-02T00:00:00.000Z",
+      "date": "2026-08-03",
       "totalSales": "0.00",
       "orderCount": 0
     }
@@ -89,14 +85,10 @@ Success response — Status: `200`
 
 Bucket rules (deterministic across time zones — all math is UTC):
 
-- Daily buckets are aligned to UTC midnight; weekly buckets are aligned
-  to Monday 00:00:00 UTC (ISO weeks).
-- Every bucket in the range is present, **zero-filled** — a day with no
-  orders is `totalSales: "0.00"`, `orderCount: 0`, never omitted.
-- A bucket's `start`/`end` are full UTC boundaries; orders are assigned
-  to the UTC day/week of their `createdAt`, restricted to the range.
-  An order at `T23:59:59Z` lands in its day's bucket; `T00:00:01Z` in the
-  next day's.
+- The selected date has one daily bucket aligned to UTC midnight.
+- The bucket is **zero-filled** when the date has no orders.
+- Each bucket includes its calendar `date`; orders are assigned by the UTC
+  day of `createdAt`.
 
 ## GET /api/dashboard/analytics/trends
 
@@ -104,21 +96,20 @@ Tier: Advanced — `PRO` and `ENTERPRISE` (feature flag
 `advancedAnalytics`), with an active subscription.
 
 Query params:
-- `start`, `end`, `granularity` — as above.
+
+- `date`, `granularity` — as above.
+
+Example: `GET /api/dashboard/analytics/trends?date=2026-08-03`
 
 Success response — Status: `200`
 
 ```json
 {
-  "range": {
-    "start": "2026-08-01T00:00:00.000Z",
-    "end": "2026-08-08T00:00:00.000Z"
-  },
+  "date": "2026-08-03",
   "granularity": "daily",
   "totals": { "totalSales": "1200.00", "orderCount": 3 },
   "previousPeriod": {
-    "start": "2026-07-25T00:00:00.000Z",
-    "end": "2026-08-01T00:00:00.000Z",
+    "date": "2026-08-02",
     "totalSales": "800.00",
     "orderCount": 2
   },
@@ -127,8 +118,7 @@ Success response — Status: `200`
 }
 ```
 
-- `previousPeriod` is the equally sized window immediately preceding
-  `start` (`[start − (end − start), start)`).
+- `previousPeriod` is the UTC calendar day immediately before `date`.
 - `changePercent` is the raw percentage difference between `totals` and
   `previousPeriod` (`(current − previous) / previous × 100`), rounded to
   one decimal. When `previousPeriod.totalSales` is `0`, `changePercent`
@@ -141,16 +131,16 @@ Tier: Advanced — `PRO` and `ENTERPRISE` (feature flag
 `advancedAnalytics`), with an active subscription.
 
 Query params:
-- `start`, `end` — as above.
+
+- `date` — as above.
+
+Example: `GET /api/dashboard/analytics/staff-performance?date=2026-08-03`
 
 Success response — Status: `200`
 
 ```json
 {
-  "range": {
-    "start": "2026-08-01T00:00:00.000Z",
-    "end": "2026-08-08T00:00:00.000Z"
-  },
+  "date": "2026-08-03",
   "staff": [
     {
       "staffMemberId": "uuid",
@@ -167,9 +157,9 @@ member:
 
 - `sales` — orders with `Order.soldByStaffId` set (the canonical source
   of staff sales attribution going forward), restricted to successful
-  sales in the range. `revenue` is the sum of `Order.total`.
+  sales on the selected date. `revenue` is the sum of `Order.total`.
 - `inventoryActivity` — `StockLedgerEntry` rows with
-  `performedByStaffId` set in the range. `entries` is the entry count;
+  `performedByStaffId` set on the selected date. `entries` is the entry count;
   `unitsAdjusted` is the sum of `quantityChange` (signed — restocks are
   positive, adjustments can be negative).
 
@@ -184,16 +174,16 @@ Tier: Advanced — `PRO` and `ENTERPRISE` (feature flag
 `advancedAnalytics`), with an active subscription.
 
 Query params:
-- `start`, `end` — as above.
+
+- `date` — as above.
+
+Example: `GET /api/dashboard/analytics/channels?date=2026-08-03`
 
 Success response — Status: `200`
 
 ```json
 {
-  "range": {
-    "start": "2026-08-01T00:00:00.000Z",
-    "end": "2026-08-08T00:00:00.000Z"
-  },
+  "date": "2026-08-03",
   "channels": [
     { "source": "POS", "orderCount": 12, "revenue": "15400.00" },
     { "source": "STOREFRONT", "orderCount": 4, "revenue": "3200.00" },
@@ -205,22 +195,22 @@ Success response — Status: `200`
 }
 ```
 
-Revenue-by-channel breakdown over successful sales in the range,
+Revenue-by-channel breakdown over successful sales on the selected date,
 grouped by `Order.source` (`OrderSource`: `POS | STOREFRONT | DIRECT |
 SOCIAL | MARKETPLACE | REFERRAL`). Every channel appears exactly once,
-zero-filled when it has no sales in the range, in the order above.
+zero-filled when it has no sales on the selected date, in the order above.
 `revenue` is the sum of `Order.total` per channel.
 
 ## Error responses
 
-| Status | Code | Condition |
-| ------ | ---- | --------- |
-| `400`  | `INVALID_RANGE` | Missing/non-UTC `start`/`end`, `start >= end`, range longer than 366 days, unknown `granularity`, `top` outside 1..50 |
-| `401`  | `UNAUTHORIZED` | Missing/invalid bearer token |
-| `403`  | `INSUFFICIENT_PERMISSIONS` | Authenticated staff without `analytics.manage` |
-| `403`  | `SUBSCRIPTION_INACTIVE` | No subscription or not ACTIVE/TRIALING (advanced endpoints only) |
-| `403`  | `ADVANCED_ANALYTICS_REQUIRED` | Tier's `advancedAnalytics` flag is false (advanced endpoints only) |
-| `429`  | `RATE_LIMITED` | — |
+| Status | Code                          | Condition                                                                      |
+| ------ | ----------------------------- | ------------------------------------------------------------------------------ |
+| `400`  | `INVALID_RANGE`               | Missing or invalid `date`, unsupported weekly granularity, `top` outside 1..50 |
+| `401`  | `UNAUTHORIZED`                | Missing/invalid bearer token                                                   |
+| `403`  | `INSUFFICIENT_PERMISSIONS`    | Authenticated staff without `analytics.manage`                                 |
+| `403`  | `SUBSCRIPTION_INACTIVE`       | No subscription or not ACTIVE/TRIALING (advanced endpoints only)               |
+| `403`  | `ADVANCED_ANALYTICS_REQUIRED` | Tier's `advancedAnalytics` flag is false (advanced endpoints only)             |
+| `429`  | `RATE_LIMITED`                | —                                                                              |
 
 Error body shape (uniform across the API):
 

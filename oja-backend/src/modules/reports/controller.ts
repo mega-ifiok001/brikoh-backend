@@ -25,24 +25,19 @@ function requireProfitTenant(req: Request): { storeId: string } {
 
 function requireProfitAccess(req: Request): {
   storeId: string;
+  date: string;
   start: Date;
   end: Date;
-  dates?: { startDate: string; endDate: string };
 } {
   const { storeId } = requireProfitTenant(req);
-  const { start, end, dates } = parseReportRange(req.query);
-  return { storeId, start, end, dates };
+  const { date, start, end } = parseReportRange(req.query);
+  return { storeId, date, start, end };
 }
 
 function sendCsv(res: Response, filename: string, csv: string): void {
   res.setHeader("Content-Type", "text/csv");
   res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
   res.status(200).send(csv);
-}
-
-/** YYYY-MM-DD (UTC) for a date — used in CSV filenames. */
-function dateSlug(date: Date): string {
-  return date.toISOString().slice(0, 10);
 }
 
 /** GET /api/dashboard/reports/inventory-valuation */
@@ -108,13 +103,9 @@ export async function pnlCsvHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { storeId, start, end, dates } = requireProfitAccess(req);
+    const { storeId, date, start, end } = requireProfitAccess(req);
     const rows = await reports.pnlCsvRows(storeId, start, end);
-    sendCsv(
-      res,
-      `pnl-${dateSlug(start)}_${dates?.endDate ?? dateSlug(end)}.csv`,
-      serializeCsv(rows),
-    );
+    sendCsv(res, `pnl-${date}_${date}.csv`, serializeCsv(rows));
   } catch (err) {
     next(err);
   }
@@ -127,13 +118,9 @@ export async function expensesByCategoryCsvHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { storeId, start, end, dates } = requireProfitAccess(req);
+    const { storeId, date, start, end } = requireProfitAccess(req);
     const rows = await reports.categoryCsvRows(storeId, start, end);
-    sendCsv(
-      res,
-      `expenses-by-category-${dateSlug(start)}_${dates?.endDate ?? dateSlug(end)}.csv`,
-      serializeCsv(rows),
-    );
+    sendCsv(res, `expenses-by-category-${date}_${date}.csv`, serializeCsv(rows));
   } catch (err) {
     next(err);
   }
