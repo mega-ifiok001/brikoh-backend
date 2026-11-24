@@ -53,12 +53,11 @@ async function createStaffMember(
 
 const DAY_MS = 86_400_000;
 
-// A fixed mid-month anchor so the range boundaries are deterministic.
+// A fixed mid-month anchor so the selected dates are deterministic.
 const ANCHOR = new Date("2026-08-18T14:30:00.000Z");
 const WEEK_START = startOfUtcWeek(ANCHOR); // 2026-08-17T00:00:00.000Z
-const WEEK_END = new Date(WEEK_START.getTime() + 7 * DAY_MS); // 2026-08-24T00:00:00.000Z
-const MONTH_START = new Date(Date.UTC(2026, 7, 1)); // 2026-08-01T00:00:00.000Z
-const MONTH_END = new Date(Date.UTC(2026, 8, 1)); // 2026-09-01T00:00:00.000Z
+const SELECTED_DAY = new Date(WEEK_START.getTime() + 2 * DAY_MS); // 2026-08-19
+const SELECTED_DATE = SELECTED_DAY.toISOString().slice(0, 10);
 
 async function seedPnlData(storeId: string) {
   // Seed relative to the fixed week so tests never depend on the wall clock.
@@ -107,13 +106,13 @@ async function seedPnlData(storeId: string) {
     });
   }
 
-  // In-week sales: 2 × priced (cost 200) + 3 × unpriced (cost null).
+  // Selected-day sales: 2 × priced (cost 200) + 3 × unpriced (cost null).
   await order(at(1), "PAID", 1900, [
     [priced.id, 2],
     [unpriced.id, 3],
   ]);
   await order(at(2), "SHIPPED", 500, [[priced.id, 1]]);
-  // Previous-week sale — outside the week, still inside the month.
+  // Sale on another date, outside the selected day.
   await order(at(-3), "PAID", 5000, [[priced.id, 10]]);
   // Non-sale status in week — must not count.
   await order(at(1), "PENDING", 999, [[priced.id, 1]]);
@@ -128,8 +127,8 @@ async function seedPnlData(storeId: string) {
   });
 }
 
-function rangeQuery(start: Date, end: Date) {
-  return { start: start.toISOString(), end: end.toISOString() };
+function dateQuery(date: string | Date = SELECTED_DATE) {
+  return { date: date instanceof Date ? date.toISOString().slice(0, 10) : date };
 }
 
 beforeEach(async () => {
@@ -163,65 +162,56 @@ afterEach(() => {
 });
 
 describe("dashboard reports (integration)", () => {
-  it("returns the P&L for an explicit range with correct revenue, cogs, and expenses", async () => {
+  it("returns the P&L for the selected date with correct revenue, cogs, and expenses", async () => {
     const { store, token } = await createTenantWithOwner();
     await seedPnlData(store.id);
 
     const res = await request(app)
       .get("/api/dashboard/reports/pnl")
       .set("Authorization", `Bearer ${token}`)
-      .query(rangeQuery(WEEK_START, WEEK_END));
+      .query(dateQuery());
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
-      range: {
-        start: WEEK_START.toISOString(),
-        end: WEEK_END.toISOString(),
-      },
-      revenue: "2400.00",
-      cogs: "600.00",
-      expenses: "462500.00",
-      netProfit: "-460700.00",
-      cogsUnpricedLineItems: 1,
+      date: SELECTED_DATE,
+      revenue: "500.00",
+      cogs: "200.00",
+      expenses: "12500.00",
+      netProfit: "-12200.00",
+      cogsUnpricedLineItems: 0,
     });
   });
 
-  it("narrows to a partial sub-range (a single day)", async () => {
+  it("returns only the selected date's sales and costs", async () => {
     const { store, token } = await createTenantWithOwner();
     await seedPnlData(store.id);
 
-    // Only the 2026-08-19 (day offset +2) SHIPPED order falls in this day.
-    const dayStart = new Date(WEEK_START.getTime() + 2 * DAY_MS);
-    const dayEnd = new Date(dayStart.getTime() + DAY_MS);
+    // Only the 2026-08-18 sale falls on the selected date.
+    const selectedDay = new Date(WEEK_START.getTime() + DAY_MS);
     const res = await request(app)
       .get("/api/dashboard/reports/pnl")
       .set("Authorization", `Bearer ${token}`)
-      .query(rangeQuery(dayStart, dayEnd));
+      .query(dateQuery(selectedDay));
 
     expect(res.status).toBe(200);
-    expect(res.body.revenue).toBe("500.00");
-    expect(res.body.cogs).toBe("200.00");
+    expect(res.body.revenue).toBe("1900.00");
+    expect(res.body.cogs).toBe("400.00");
+    expect(res.body.cogsUnpricedLineItems).toBe(1);
   });
 
-  it("breaks expenses down by category for the range", async () => {
+  it("breaks expenses down by category for the selected date", async () => {
     const { store, token } = await createTenantWithOwner();
     await seedPnlData(store.id);
 
     const res = await request(app)
       .get("/api/dashboard/reports/expenses-by-category")
       .set("Authorization", `Bearer ${token}`)
-      .query(rangeQuery(WEEK_START, WEEK_END));
+      .query(dateQuery());
 
     expect(res.status).toBe(200);
-    expect(res.body.categories).toEqual([
-      { category: "RENT", count: 1, total: "450000.00" },
-      { category: "PACKAGING", count: 1, total: "12500.00" },
-    ]);
-    expect(res.body.grandTotal).toBe("462500.00");
-    expect(res.body.range).toEqual({
-      start: WEEK_START.toISOString(),
-      end: WEEK_END.toISOString(),
-    });
+    expect(res.body.categories).toEqual([{ category: "PACKAGING", count: 1, total: "12500.00" }]);
+    expect(res.body.grandTotal).toBe("12500.00");
+    expect(res.body.date).toBe(SELECTED_DATE);
   });
 
   it("exports the P&L as a CSV attachment with a date-based filename", async () => {
@@ -231,22 +221,22 @@ describe("dashboard reports (integration)", () => {
     const res = await request(app)
       .get("/api/dashboard/reports/pnl/export.csv")
       .set("Authorization", `Bearer ${token}`)
-      .query(rangeQuery(MONTH_START, MONTH_END));
+      .query(dateQuery());
 
     expect(res.status).toBe(200);
     expect(res.headers["content-type"]).toContain("text/csv");
     expect(res.headers["content-disposition"]).toContain("attachment");
-    expect(res.headers["content-disposition"]).toContain("pnl-2026-08-01_2026-09-01.csv");
+    expect(res.headers["content-disposition"]).toContain(
+      `pnl-${SELECTED_DATE}_${SELECTED_DATE}.csv`,
+    );
     const body = res.text;
     expect(body.split("\r\n")[0]).toBe(
-      "start,end,revenue,cogs,expenses,netProfit,cogsUnpricedLineItems",
+      "date,revenue,cogs,expenses,netProfit,cogsUnpricedLineItems",
     );
-    expect(body).toContain(
-      `${MONTH_START.toISOString()},${MONTH_END.toISOString()},7400.00,2600.00,912500.00,-907700.00,1`,
-    );
+    expect(body).toContain(`${SELECTED_DATE},500.00,200.00,12500.00,-12200.00,0`);
   });
 
-  it("rejects a missing or invalid range with INVALID_RANGE", async () => {
+  it("rejects a missing date, invalid date, and legacy interval parameters", async () => {
     const { token } = await createTenantWithOwner();
 
     const missing = await request(app)
@@ -254,22 +244,22 @@ describe("dashboard reports (integration)", () => {
       .set("Authorization", `Bearer ${token}`);
     expect(missing.status).toBe(400);
     expect(missing.body.error.code).toBe("INVALID_RANGE");
-    expect(missing.body.error.message).toMatch(/start and end date/i);
+    expect(missing.body.error.message).toMatch(/provide a date/i);
 
     const reversed = await request(app)
       .get("/api/dashboard/reports/pnl")
       .set("Authorization", `Bearer ${token}`)
-      .query(rangeQuery(WEEK_END, WEEK_START));
+      .query({ date: "2026-02-30" });
     expect(reversed.status).toBe(400);
     expect(reversed.body.error.code).toBe("INVALID_RANGE");
-    expect(reversed.body.error.message).toMatch(/before the end date/i);
+    expect(reversed.body.error.message).toMatch(/valid calendar date/i);
 
-    const nonUtc = await request(app)
+    const legacyRange = await request(app)
       .get("/api/dashboard/reports/pnl")
       .set("Authorization", `Bearer ${token}`)
-      .query({ start: "2026-08-01T00:00:00+01:00", end: MONTH_END.toISOString() });
-    expect(nonUtc.status).toBe(400);
-    expect(nonUtc.body.error.code).toBe("INVALID_RANGE");
+      .query({ start: "2026-08-01", end: "2026-08-02" });
+    expect(legacyRange.status).toBe(400);
+    expect(legacyRange.body.error.code).toBe("INVALID_RANGE");
   });
 
   it("requires the analytics.manage permission to reach the reports", async () => {
@@ -279,7 +269,7 @@ describe("dashboard reports (integration)", () => {
     const res = await request(app)
       .get("/api/dashboard/reports/pnl")
       .set("Authorization", `Bearer ${staff.token}`)
-      .query(rangeQuery(WEEK_START, WEEK_END));
+      .query(dateQuery());
 
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe("ACCESS_DENIED");
@@ -295,14 +285,14 @@ describe("dashboard reports (integration)", () => {
     const pnl = await request(app)
       .get("/api/dashboard/reports/pnl")
       .set("Authorization", `Bearer ${staff.token}`)
-      .query(rangeQuery(WEEK_START, WEEK_END));
+      .query(dateQuery());
     expect(pnl.status).toBe(403);
     expect(pnl.body.error.code).toBe("ACCESS_DENIED");
 
     const csv = await request(app)
       .get("/api/dashboard/reports/pnl/export.csv")
       .set("Authorization", `Bearer ${staff.token}`)
-      .query(rangeQuery(WEEK_START, WEEK_END));
+      .query(dateQuery());
     expect(csv.status).toBe(403);
   });
 
@@ -316,10 +306,10 @@ describe("dashboard reports (integration)", () => {
     const res = await request(app)
       .get("/api/dashboard/reports/pnl")
       .set("Authorization", `Bearer ${staff.token}`)
-      .query(rangeQuery(WEEK_START, WEEK_END));
+      .query(dateQuery());
 
     expect(res.status).toBe(200);
-    expect(res.body.range.start).toBe(WEEK_START.toISOString());
+    expect(res.body.date).toBe(SELECTED_DATE);
   });
 });
 

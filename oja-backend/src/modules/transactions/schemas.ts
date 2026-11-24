@@ -9,7 +9,7 @@ const calendarDate = z
     return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
   }, "must be a valid calendar date");
 
-export const transactionQuerySchema = z
+const transactionQueryBaseSchema = z
   .object({
     from: calendarDate,
     to: calendarDate,
@@ -32,7 +32,9 @@ export const transactionQuerySchema = z
     cursor: z.string().max(1024).optional(),
     limit: z.coerce.number().int().min(1).max(100).default(50),
   })
-  .strict()
+  .strict();
+
+export const transactionQuerySchema = transactionQueryBaseSchema
   .refine((value) => value.from <= value.to, {
     message: "from must be on or before to",
     path: ["to"],
@@ -49,10 +51,23 @@ export const transactionQuerySchema = z
     },
   );
 
-export const transactionExportQuerySchema = transactionQuerySchema.omit({
-  cursor: true,
-  limit: true,
-});
+export const transactionExportQuerySchema = transactionQueryBaseSchema
+  .omit({ cursor: true, limit: true })
+  .refine((value) => value.from <= value.to, {
+    message: "from must be on or before to",
+    path: ["to"],
+  })
+  .refine(
+    (value) => {
+      const from = Date.parse(`${value.from}T00:00:00.000Z`);
+      const to = Date.parse(`${value.to}T00:00:00.000Z`);
+      return to - from <= 366 * 86_400_000;
+    },
+    {
+      message: "date range cannot exceed 367 calendar days",
+      path: ["to"],
+    },
+  );
 export type TransactionQuery = z.infer<typeof transactionQuerySchema>;
 export type TransactionExportQuery = z.infer<typeof transactionExportQuerySchema>;
 

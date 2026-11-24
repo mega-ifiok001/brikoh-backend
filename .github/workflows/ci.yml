@@ -16,14 +16,15 @@ jobs:
       NODE_ENV: test
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/brikoh_test
       TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/brikoh_test
-      JWT_SECRET: ${{ secrets.JWT_SECRET }}
-      JWT_REFRESH_SECRET: ${{ secrets.JWT_REFRESH_SECRET }}
+      # Ephemeral test-only keys; CI must not depend on production repo secrets.
+      JWT_SECRET: ci-test-jwt-secret-not-used-in-production-32chars
+      JWT_REFRESH_SECRET: ci-test-refresh-jwt-secret-not-used-prod
       JWT_ACCESS_EXPIRES_IN: 15m
       JWT_REFRESH_EXPIRES_IN: 7d
       # Platform-staff (admin) JWT — a SEPARATE secret from JWT_SECRET.
-      # Secret is set in GitHub repo settings (32 chars, passes min 16).
-      ADMIN_JWT_SECRET: ${{ secrets.ADMIN_JWT_SECRET }}
+      ADMIN_JWT_SECRET: ci-test-admin-jwt-secret-not-used-in-production
       ADMIN_JWT_ACCESS_EXPIRES_IN: 15m
+      OTP_HMAC_SECRET: ci-test-otp-hmac-secret-not-used-in-production
       # Dummies are enough: Cloudinary signing is a pure local computation
       # and the test suite never touches the Cloudinary network endpoint.
       # Real values go in GitHub secrets once an e2e suite needs actual

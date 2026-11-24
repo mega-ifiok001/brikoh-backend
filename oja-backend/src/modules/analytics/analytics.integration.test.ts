@@ -9,7 +9,7 @@ import type { $Enums } from "../../../generated/prisma/client.js";
 const prisma = createPrismaClient(process.env.TEST_DATABASE_URL);
 
 const RANGE_START = "2026-08-03T00:00:00.000Z";
-const RANGE_END = "2026-08-07T00:00:00.000Z";
+const SELECTED_DATE = "2026-08-03";
 
 async function createTenantWithOwner() {
   const email = `owner-${crypto.randomUUID()}@example.com`;
@@ -197,6 +197,13 @@ async function seedStoreA(storeId: string) {
     lines: [{ productId: bagel.id, quantity: 1, unitPriceAtPurchase: 3.5 }],
   });
   await createOrderRow(storeId, {
+    createdAt: "2026-08-04T12:00:00.000Z",
+    status: "PAID",
+    total: 10.0,
+    soldByStaffId: ben.staff.id,
+    lines: [{ productId: muffin.id, quantity: 2, unitPriceAtPurchase: 5.0 }],
+  });
+  await createOrderRow(storeId, {
     createdAt: "2026-08-05T00:00:00.000Z",
     status: "SHIPPED",
     total: 20.0,
@@ -314,18 +321,18 @@ describe("GET /api/dashboard/analytics/summary (integration)", () => {
 
     const res = await request(app)
       .get("/api/dashboard/analytics/summary")
-      .query({ start: RANGE_START, end: RANGE_END })
+      .query({ date: SELECTED_DATE })
       .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
-      range: { start: RANGE_START, end: RANGE_END },
-      totalSales: "89.00",
-      orderCount: 7,
+      date: SELECTED_DATE,
+      totalSales: "35.50",
+      orderCount: 3,
       bestSellers: [
-        { productId: expect.any(String), name: "Chai", units: 5, revenue: "50.00" },
-        { productId: expect.any(String), name: "Muffin", units: 5, revenue: "25.00" },
-        { productId: expect.any(String), name: "Bagel", units: 4, revenue: "14.00" },
+        { productId: expect.any(String), name: "Chai", units: 2, revenue: "20.00" },
+        { productId: expect.any(String), name: "Bagel", units: 3, revenue: "10.50" },
+        { productId: expect.any(String), name: "Muffin", units: 1, revenue: "5.00" },
       ],
     });
   });
@@ -336,7 +343,7 @@ describe("GET /api/dashboard/analytics/summary (integration)", () => {
 
     const res = await request(app)
       .get("/api/dashboard/analytics/summary")
-      .query({ start: RANGE_START, end: RANGE_END, top: 2 })
+      .query({ date: SELECTED_DATE, top: 2 })
       .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(200);
@@ -344,13 +351,13 @@ describe("GET /api/dashboard/analytics/summary (integration)", () => {
     expect(res.body.bestSellers.map((b: { name: string }) => b.name)).toEqual(["Chai", "Muffin"]);
   });
 
-  it("returns zeros for a range with no orders", async () => {
+  it("returns zeros for a date with no orders", async () => {
     const { store, token } = await createTenantWithOwner();
     await seedStoreA(store.id);
 
     const res = await request(app)
       .get("/api/dashboard/analytics/summary")
-      .query({ start: "2026-08-10T00:00:00.000Z", end: "2026-08-12T00:00:00.000Z" })
+      .query({ date: "2026-08-10" })
       .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(200);
@@ -363,11 +370,11 @@ describe("GET /api/dashboard/analytics/summary (integration)", () => {
 
     const res = await request(app)
       .get("/api/dashboard/analytics/summary")
-      .query({ start: RANGE_START, end: RANGE_END })
+      .query({ date: SELECTED_DATE })
       .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.orderCount).toBe(7);
+    expect(res.body.orderCount).toBe(3);
   });
 
   it("does not leak another tenant's orders (cross-tenant isolation)", async () => {
@@ -376,7 +383,7 @@ describe("GET /api/dashboard/analytics/summary (integration)", () => {
     const { store: storeB, token: tokenB } = await createTenantWithOwner();
     const pb = await createProductRow(storeB.id, "Sneaky Product", 9999.0);
     await createOrderRow(storeB.id, {
-      createdAt: "2026-08-04T12:00:00.000Z",
+      createdAt: "2026-08-03T12:00:00.000Z",
       status: "PAID",
       total: 9999.0,
       lines: [{ productId: pb.id, quantity: 1, unitPriceAtPurchase: 9999.0 }],
@@ -384,17 +391,17 @@ describe("GET /api/dashboard/analytics/summary (integration)", () => {
 
     const resA = await request(app)
       .get("/api/dashboard/analytics/summary")
-      .query({ start: RANGE_START, end: RANGE_END })
+      .query({ date: SELECTED_DATE })
       .set("Authorization", `Bearer ${tokenA}`);
     expect(resA.status).toBe(200);
-    expect(resA.body).toMatchObject({ totalSales: "89.00", orderCount: 7 });
+    expect(resA.body).toMatchObject({ totalSales: "35.50", orderCount: 3 });
     expect(resA.body.bestSellers.map((b: { name: string }) => b.name)).not.toContain(
       "Sneaky Product",
     );
 
     const resB = await request(app)
       .get("/api/dashboard/analytics/summary")
-      .query({ start: RANGE_START, end: RANGE_END })
+      .query({ date: SELECTED_DATE })
       .set("Authorization", `Bearer ${tokenB}`);
     expect(resB.status).toBe(200);
     expect(resB.body).toMatchObject({ totalSales: "9999.00", orderCount: 1 });
@@ -408,7 +415,7 @@ describe("GET /api/dashboard/analytics/summary (integration)", () => {
 
     const res = await request(app)
       .get("/api/dashboard/analytics/summary")
-      .query({ start: RANGE_START, end: RANGE_END })
+      .query({ date: SELECTED_DATE })
       .set("Authorization", `Bearer ${staffToken}`);
 
     expect(res.status).toBe(403);
@@ -428,7 +435,7 @@ describe("GET /api/dashboard/analytics/summary (integration)", () => {
 
     const res = await request(app)
       .get("/api/dashboard/analytics/summary")
-      .query({ start: RANGE_START, end: RANGE_END })
+      .query({ date: SELECTED_DATE })
       .set("Authorization", `Bearer ${staffToken}`);
 
     expect(res.status).toBe(200);
@@ -442,82 +449,36 @@ describe("GET /api/dashboard/analytics/timeseries (integration)", () => {
 
     const res = await request(app)
       .get("/api/dashboard/analytics/timeseries")
-      .query({ start: RANGE_START, end: RANGE_END, granularity: "daily" })
+      .query({ date: SELECTED_DATE })
       .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.buckets).toEqual([
-      {
-        start: "2026-08-03T00:00:00.000Z",
-        end: "2026-08-04T00:00:00.000Z",
-        totalSales: "35.50",
-        orderCount: 3,
-      },
-      {
-        start: "2026-08-04T00:00:00.000Z",
-        end: "2026-08-05T00:00:00.000Z",
-        totalSales: "0.00",
-        orderCount: 0,
-      },
-      {
-        start: "2026-08-05T00:00:00.000Z",
-        end: "2026-08-06T00:00:00.000Z",
-        totalSales: "40.00",
-        orderCount: 3,
-      },
-      {
-        start: "2026-08-06T00:00:00.000Z",
-        end: "2026-08-07T00:00:00.000Z",
-        totalSales: "13.50",
-        orderCount: 1,
-      },
-    ]);
+    expect(res.body.buckets).toEqual([{ date: SELECTED_DATE, totalSales: "35.50", orderCount: 3 }]);
   });
 
-  it("assigns orders across a UTC midnight boundary to their own buckets", async () => {
+  it("returns only the selected UTC calendar day at a midnight boundary", async () => {
     const { store, token } = await createTenantWithOwner();
     await seedStoreA(store.id);
 
     const res = await request(app)
       .get("/api/dashboard/analytics/timeseries")
-      .query({ start: "2026-08-05T23:30:00.000Z", end: "2026-08-06T00:30:00.000Z" })
+      .query({ date: "2026-08-05" })
       .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.buckets).toEqual([
-      {
-        start: "2026-08-05T00:00:00.000Z",
-        end: "2026-08-06T00:00:00.000Z",
-        totalSales: "10.00",
-        orderCount: 1,
-      },
-      {
-        start: "2026-08-06T00:00:00.000Z",
-        end: "2026-08-07T00:00:00.000Z",
-        totalSales: "13.50",
-        orderCount: 1,
-      },
-    ]);
+    expect(res.body.buckets).toEqual([{ date: "2026-08-05", totalSales: "30.00", orderCount: 2 }]);
   });
 
-  it("returns a single Monday-aligned weekly bucket", async () => {
+  it("rejects weekly buckets because analytics is date-based", async () => {
     const { store, token } = await createTenantWithOwner();
     await seedStoreA(store.id);
 
     const res = await request(app)
       .get("/api/dashboard/analytics/timeseries")
-      .query({ start: RANGE_START, end: RANGE_END, granularity: "weekly" })
+      .query({ date: SELECTED_DATE, granularity: "weekly" })
       .set("Authorization", `Bearer ${token}`);
 
-    expect(res.status).toBe(200);
-    expect(res.body.buckets).toEqual([
-      {
-        start: "2026-08-03T00:00:00.000Z",
-        end: "2026-08-10T00:00:00.000Z",
-        totalSales: "89.00",
-        orderCount: 7,
-      },
-    ]);
+    expect(res.status).toBe(400);
   });
 });
 
@@ -529,18 +490,17 @@ describe("GET /api/dashboard/analytics/trends (advanced, integration)", () => {
 
     const res = await request(app)
       .get("/api/dashboard/analytics/trends")
-      .query({ start: RANGE_START, end: RANGE_END })
+      .query({ date: SELECTED_DATE })
       .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.totals).toEqual({ totalSales: "89.00", orderCount: 7 });
+    expect(res.body.totals).toEqual({ totalSales: "35.50", orderCount: 3 });
     expect(res.body.previousPeriod).toEqual({
-      start: "2026-07-30T00:00:00.000Z",
-      end: "2026-08-03T00:00:00.000Z",
-      totalSales: "20.00",
-      orderCount: 1,
+      date: "2026-08-02",
+      totalSales: "0.00",
+      orderCount: 0,
     });
-    expect(res.body.changePercent).toBe(345);
+    expect(res.body.changePercent).toBeNull();
   });
 
   it("returns null changePercent when the previous period had no sales", async () => {
@@ -550,7 +510,7 @@ describe("GET /api/dashboard/analytics/trends (advanced, integration)", () => {
 
     const res = await request(app)
       .get("/api/dashboard/analytics/trends")
-      .query({ start: "2026-08-10T00:00:00.000Z", end: "2026-08-12T00:00:00.000Z" })
+      .query({ date: "2026-08-10" })
       .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(200);
@@ -566,7 +526,7 @@ describe("GET /api/dashboard/analytics/trends (advanced, integration)", () => {
 
     const res = await request(app)
       .get("/api/dashboard/analytics/trends")
-      .query({ start: RANGE_START, end: RANGE_END })
+      .query({ date: "2026-08-04" })
       .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(403);
@@ -579,7 +539,7 @@ describe("GET /api/dashboard/analytics/trends (advanced, integration)", () => {
 
     const res = await request(app)
       .get("/api/dashboard/analytics/trends")
-      .query({ start: RANGE_START, end: RANGE_END })
+      .query({ date: SELECTED_DATE })
       .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(403);
@@ -595,22 +555,22 @@ describe("GET /api/dashboard/analytics/staff-performance (advanced, integration)
 
     const res = await request(app)
       .get("/api/dashboard/analytics/staff-performance")
-      .query({ start: RANGE_START, end: RANGE_END })
+      .query({ date: "2026-08-04" })
       .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(200);
     expect(res.body.staff).toEqual([
       {
         staffMemberId: expect.any(String),
-        name: "Ada Obi",
-        sales: { orderCount: 2, revenue: "45.00" },
-        inventoryActivity: { entries: 2, unitsAdjusted: 15 },
-      },
-      {
-        staffMemberId: expect.any(String),
         name: "Ben Yusuf",
         sales: { orderCount: 1, revenue: "10.00" },
         inventoryActivity: { entries: 0, unitsAdjusted: 0 },
+      },
+      {
+        staffMemberId: expect.any(String),
+        name: "Ada Obi",
+        sales: { orderCount: 0, revenue: "0.00" },
+        inventoryActivity: { entries: 2, unitsAdjusted: 15 },
       },
       {
         staffMemberId: expect.any(String),
@@ -628,7 +588,7 @@ describe("GET /api/dashboard/analytics/staff-performance (advanced, integration)
 
     const res = await request(app)
       .get("/api/dashboard/analytics/staff-performance")
-      .query({ start: RANGE_START, end: RANGE_END })
+      .query({ date: SELECTED_DATE })
       .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(403);
@@ -636,41 +596,21 @@ describe("GET /api/dashboard/analytics/staff-performance (advanced, integration)
   });
 });
 
-describe("range validation (shared by all analytics endpoints)", () => {
-  it("rejects a non-UTC offset", async () => {
+describe("date validation (shared by all analytics endpoints)", () => {
+  it("requires one valid calendar date", async () => {
     const { token } = await createTenantWithOwner();
 
-    const res = await request(app)
+    const missing = await request(app)
       .get("/api/dashboard/analytics/summary")
-      .query({ start: "2026-08-03T00:00:00+01:00", end: RANGE_END })
       .set("Authorization", `Bearer ${token}`);
+    expect(missing.status).toBe(400);
 
-    expect(res.status).toBe(400);
-    expect(res.body.error.code).toBe("INVALID_RANGE");
-  });
-
-  it("rejects start >= end", async () => {
-    const { token } = await createTenantWithOwner();
-
-    const res = await request(app)
+    const invalid = await request(app)
       .get("/api/dashboard/analytics/summary")
-      .query({ start: RANGE_END, end: RANGE_START })
+      .query({ date: "2026-02-30" })
       .set("Authorization", `Bearer ${token}`);
-
-    expect(res.status).toBe(400);
-    expect(res.body.error.code).toBe("INVALID_RANGE");
-  });
-
-  it("rejects a range longer than 366 days", async () => {
-    const { token } = await createTenantWithOwner();
-
-    const res = await request(app)
-      .get("/api/dashboard/analytics/summary")
-      .query({ start: "2024-12-31T00:00:00.000Z", end: "2026-01-02T00:00:00.000Z" })
-      .set("Authorization", `Bearer ${token}`);
-
-    expect(res.status).toBe(400);
-    expect(res.body.error.code).toBe("INVALID_RANGE");
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.error.code).toBe("INVALID_RANGE");
   });
 
   it("rejects an unknown granularity", async () => {
@@ -678,7 +618,7 @@ describe("range validation (shared by all analytics endpoints)", () => {
 
     const res = await request(app)
       .get("/api/dashboard/analytics/timeseries")
-      .query({ start: RANGE_START, end: RANGE_END, granularity: "hourly" })
+      .query({ date: SELECTED_DATE, granularity: "hourly" })
       .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(400);
@@ -722,7 +662,7 @@ describe("GET /api/dashboard/analytics/channels (advanced, integration)", () => 
 
     const res = await request(app)
       .get("/api/dashboard/analytics/channels")
-      .query({ start: RANGE_START, end: RANGE_END })
+      .query({ date: SELECTED_DATE })
       .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(200);
@@ -742,7 +682,7 @@ describe("GET /api/dashboard/analytics/channels (advanced, integration)", () => 
 
     const res = await request(app)
       .get("/api/dashboard/analytics/channels")
-      .query({ start: RANGE_START, end: RANGE_END })
+      .query({ date: SELECTED_DATE })
       .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(403);
