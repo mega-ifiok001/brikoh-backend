@@ -101,11 +101,11 @@ Status: `200`
 
 ### Error responses
 
-| Status | Code                       | Condition                                                          |
-| ------ | -------------------------- | ------------------------------------------------------------------ |
-| `400`  | `VALIDATION_ERROR`         | Malformed query (bad range, bad `limit`, malformed `start`/`end`). |
-| `401`  | `UNAUTHORIZED`             | Missing, malformed, or expired token.                              |
-| `403`  | `INSUFFICIENT_PERMISSIONS` | Staff role without `orders.manage`.                                |
+| Status | Code                       | Condition                                                                       |
+| ------ | -------------------------- | ------------------------------------------------------------------------------- |
+| `400`  | `VALIDATION_ERROR`         | Malformed query (invalid `date`, bad `limit`, or unsupported range parameters). |
+| `401`  | `UNAUTHORIZED`             | Missing, malformed, or expired token.                                           |
+| `403`  | `INSUFFICIENT_PERMISSIONS` | Staff role without `orders.manage`.                                             |
 
 Uniform error body shape (see `docs/api-contracts/README.md`).
 
