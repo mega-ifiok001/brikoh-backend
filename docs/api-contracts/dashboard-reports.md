@@ -18,33 +18,41 @@ not). Anyone with `analytics.manage` but without `viewProfit` gets
 `403 INSUFFICIENT_PERMISSIONS` on every report endpoint, including the
 CSV exports.
 
-## Date range
+## Date filter
 
-Every range-based endpoint takes two query params:
+Range-based endpoints accept explicit calendar dates in UTC. Use exactly one
+of these query shapes:
 
-- `start` — required, UTC ISO-8601 with an explicit offset (`Z` or `+00:00`).
-- `end` — required, same format. Must be **after** `start`.
+- One day: `?date=2026-08-17`
+- Inclusive range: `?startDate=2026-08-17&endDate=2026-08-23`
 
-The range is half-open `[start, end)`: orders/expenses are counted when
-their timestamp is `>= start` and `< end`. Both are required — omitting
-either is a `400 INVALID_RANGE`; there is no default range.
+Dates must be real calendar days in `YYYY-MM-DD` format. `endDate` is
+inclusive. The backend converts the selection to a half-open UTC interval:
+midnight at `startDate` through midnight after `endDate`. For example,
+`date=2026-08-17` filters timestamps in
+`[2026-08-17T00:00:00.000Z, 2026-08-18T00:00:00.000Z)`. This interval
+works for timestamped orders and the expense `DATE` column, independent of
+the server's local timezone.
 
-The frontend is free to offer "This week / This month / …" buttons, but it
-does so by computing the `start`/`end` dates client-side — the API exposes
-only the explicit range.
+The older `start` + `end` UTC ISO-8601 timestamp parameters remain accepted
+for existing clients. Their semantics remain half-open (`>= start`, `< end`).
+New clients should use the date-only forms so a selected end date is included
+in full.
 
-The response echoes the resolved `range` with its exact UTC `start`/`end`
-so the client can label the report without recomputing boundaries.
+The response's `range.start` and `range.end` are the resolved UTC boundaries;
+`range.end` is exclusive. Clients can retain the selected date labels or
+derive the inclusive end date by subtracting one UTC calendar day.
 
 **Range errors** are `400 INVALID_RANGE` with a clear, human-readable
 message:
 
-| Cause | Message |
-| ----- | ------- |
-| `start` or `end` missing | "Please provide both a start and end date." |
-| not a valid date-time | "Enter a valid date and time." |
-| missing UTC offset | "Dates must be in UTC (include a 'Z' or '+00:00' offset)." |
-| `start >= end` | "The start date must be before the end date." |
+| Cause                                 | Message                                                               |
+| ------------------------------------- | --------------------------------------------------------------------- |
+| A range boundary missing              | "Please provide both a start date and end date."                      |
+| Malformed or impossible calendar date | "Enter a date in YYYY-MM-DD format." / "Enter a valid calendar date." |
+| Start date after end date             | "The start date must be on or before the end date."                   |
+| Legacy timestamps missing UTC offset  | "Dates must be in UTC (include a 'Z' or '+00:00' offset)."            |
+| Legacy `start >= end`                 | "The start date must be before the end date."                         |
 
 ## GET /api/dashboard/reports/pnl
 
@@ -140,8 +148,9 @@ Status: `200`
 Headers:
 
 - `Content-Type: text/csv`
-- `Content-Disposition: attachment; filename="pnl-2026-08-17_2026-08-24.csv"`
-  (server-generated from the range's UTC dates)
+- `Content-Disposition: attachment; filename="pnl-2026-08-17_2026-08-23.csv"`
+  (for `startDate=2026-08-17&endDate=2026-08-23`; server-generated from
+  the selected inclusive UTC dates)
 
 Body: the CSV text.
 
@@ -201,11 +210,11 @@ MUG-001,Ceramic Mug,12,450.00,1500.00,5400.00,18000.00
 
 ## Error responses
 
-| Status | Code | Condition |
-| ------ | ---- | --------- |
-| `400`  | `INVALID_RANGE` | Missing, malformed, non-UTC, or reversed (`start >= end`) date range |
-| `401`  | `UNAUTHORIZED` | Missing/invalid bearer token |
-| `403`  | `INSUFFICIENT_PERMISSIONS` | Staff without `analytics.manage`, or without `viewProfit` |
+| Status | Code                       | Condition                                                                     |
+| ------ | -------------------------- | ----------------------------------------------------------------------------- |
+| `400`  | `INVALID_RANGE`            | Missing, malformed, impossible, mixed, non-UTC legacy, or reversed date range |
+| `401`  | `UNAUTHORIZED`             | Missing/invalid bearer token                                                  |
+| `403`  | `INSUFFICIENT_PERMISSIONS` | Staff without `analytics.manage`, or without `viewProfit`                     |
 
 Note: there is no `404` — reports always aggregate over whatever data
 exists (an empty range returns zeroed sums, not an error).

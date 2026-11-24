@@ -23,10 +23,15 @@ function requireProfitTenant(req: Request): { storeId: string } {
   return { storeId: tenant.storeId };
 }
 
-function requireProfitAccess(req: Request): { storeId: string; start: Date; end: Date } {
+function requireProfitAccess(req: Request): {
+  storeId: string;
+  start: Date;
+  end: Date;
+  dates?: { startDate: string; endDate: string };
+} {
   const { storeId } = requireProfitTenant(req);
-  const { start, end } = parseReportRange(req.query);
-  return { storeId, start, end };
+  const { start, end, dates } = parseReportRange(req.query);
+  return { storeId, start, end, dates };
 }
 
 function sendCsv(res: Response, filename: string, csv: string): void {
@@ -103,9 +108,13 @@ export async function pnlCsvHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { storeId, start, end } = requireProfitAccess(req);
+    const { storeId, start, end, dates } = requireProfitAccess(req);
     const rows = await reports.pnlCsvRows(storeId, start, end);
-    sendCsv(res, `pnl-${dateSlug(start)}_${dateSlug(end)}.csv`, serializeCsv(rows));
+    sendCsv(
+      res,
+      `pnl-${dateSlug(start)}_${dates?.endDate ?? dateSlug(end)}.csv`,
+      serializeCsv(rows),
+    );
   } catch (err) {
     next(err);
   }
@@ -118,11 +127,11 @@ export async function expensesByCategoryCsvHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { storeId, start, end } = requireProfitAccess(req);
+    const { storeId, start, end, dates } = requireProfitAccess(req);
     const rows = await reports.categoryCsvRows(storeId, start, end);
     sendCsv(
       res,
-      `expenses-by-category-${dateSlug(start)}_${dateSlug(end)}.csv`,
+      `expenses-by-category-${dateSlug(start)}_${dates?.endDate ?? dateSlug(end)}.csv`,
       serializeCsv(rows),
     );
   } catch (err) {
