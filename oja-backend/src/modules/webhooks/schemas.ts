@@ -18,6 +18,8 @@ export const paystackWebhookSchema = z.object({
     status: z.string().optional(),
     transfer_code: z.string().optional(),
     fee: z.number().optional(),
+    // Paystack reports charge fees in subunits (kobo) on charge.success.
+    fees: z.number().int().nonnegative().optional(),
   }),
 });
 

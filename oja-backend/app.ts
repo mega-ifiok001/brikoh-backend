@@ -47,6 +47,7 @@ import { invitePublicRouter, staffRouter } from "./src/modules/staff/routes.js";
 import { requireOwner } from "./src/middleware/requireOwner.js";
 import { paymentsRouter } from "./src/modules/payments/routes.js";
 import { walletRouter } from "./src/modules/wallet/routes.js";
+import { transactionsRouter } from "./src/modules/transactions/routes.js";
 import { checkoutRouter, ordersRouter, publicOrdersRouter } from "./src/modules/orders/routes.js";
 import { webhooksRouter } from "./src/modules/webhooks/routes.js";
 import { subscriptionsRouter } from "./src/modules/subscriptions/routes.js";
@@ -323,6 +324,17 @@ export function createApp(): Express {
     requireOwner,
     rateLimit({ windowMs: 60_000, max: 300 }),
     walletRouter,
+  );
+  // Unified money history combines wallet ledger entries with sales,
+  // invoice payments, and credit repayments. Require the reports trust
+  // level: analytics.manage plus the explicit viewProfit flag for staff.
+  app.use(
+    "/api/dashboard/transactions",
+    authenticate,
+    resolveTenant,
+    authorize("analytics.manage"),
+    rateLimit({ windowMs: 60_000, max: 300 }),
+    transactionsRouter,
   );
 
   // --- webhooks group ----------------------------------------------------

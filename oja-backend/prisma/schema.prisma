@@ -1146,6 +1146,9 @@ model Order {
   // echoed by the provider.
   paymentProvider      String?
   paymentReference     String?
+  // Paystack transaction fee in NGN. Null for legacy rows or providers
+  // that do not include a fee in the signed charge.success event.
+  paymentFee           Decimal?        @db.Decimal(10, 2)
   authorizationUrl     String?
   // Set when the customer clicks "I have paid" on a bank-transfer order.
   paymentSubmittedAt   DateTime?       @db.Timestamptz(3)
