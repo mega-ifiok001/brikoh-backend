@@ -436,7 +436,7 @@ export async function initiateCheckout(
     courierName?: string;
     shipbubbleCourierId?: string;
     shipbubbleServiceCode?: string;
-    shipbubbleRateQuote?: { connect: { id: string } };
+    shipbubbleRateQuoteId?: string;
   } | null = null;
   let selectedShipbubbleRate: SelectedShipbubbleRate | null = null;
 
@@ -541,7 +541,7 @@ export async function initiateCheckout(
         : {
             shipbubbleCourierId: selectedShipbubbleRate.courierId,
             shipbubbleServiceCode: selectedShipbubbleRate.serviceCode,
-            shipbubbleRateQuote: { connect: { id: selectedShipbubbleRate.quoteId } },
+            shipbubbleRateQuoteId: selectedShipbubbleRate.quoteId,
           }),
     };
   }
