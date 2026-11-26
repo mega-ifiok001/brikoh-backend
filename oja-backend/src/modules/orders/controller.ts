@@ -10,6 +10,7 @@ import {
   rejectBankTransferPayment,
 } from "./service.js";
 import { recordPosSale } from "./pos.service.js";
+import { getFulfillment, updateFulfillment } from "./fulfillment.service.js";
 import { confirmBankTransferSchema, listOrdersParamsSchema, validateOrThrow } from "./schemas.js";
 
 /** POST /api/public/checkout/:subdomain */
@@ -81,6 +82,44 @@ export async function getOrderHandler(
   }
   try {
     res.status(200).json(await getOrderDetail(tenant.storeId, String(req.params.orderId)));
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** GET /api/dashboard/orders/:orderId/fulfillment */
+export async function getFulfillmentHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const tenant = req.tenant;
+    if (tenant === undefined) throw new AppError(401, "UNAUTHORIZED", "Authentication required");
+    res.status(200).json(await getFulfillment(tenant.storeId, String(req.params.orderId)));
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** PATCH /api/dashboard/orders/:orderId/fulfillment */
+export async function updateFulfillmentHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const tenant = req.tenant;
+    if (tenant === undefined) throw new AppError(401, "UNAUTHORIZED", "Authentication required");
+    res.status(200).json(
+      await updateFulfillment(
+        tenant.storeId,
+        String(req.params.orderId),
+        tenant.staffMemberId,
+        req.body,
+        req.header("Idempotency-Key"),
+      ),
+    );
   } catch (err) {
     next(err);
   }

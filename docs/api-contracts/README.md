@@ -122,6 +122,7 @@ Error body shape (uniform across the API):
 - [Analytics endpoints](analytics-api.md)
 - [POST /api/dashboard/orders — record a POS sale](dashboard-pos.md)
 - [GET /api/dashboard/orders + /:orderId](dashboard-orders.md)
+- [Dashboard order fulfilment transitions](dashboard-order-fulfillment.md)
 - [GET /api/dashboard/overview — home-screen widgets](dashboard-overview.md)
 - [Dashboard settings — business, notifications, password, account](dashboard-settings.md)
 - [Dashboard notifications — merchant alerts](dashboard-notifications.md)

@@ -97,6 +97,32 @@ export const checkoutSchema = z
 
 export type CheckoutInput = z.infer<typeof checkoutSchema>;
 
+export const fulfillmentStatusSchema = z.enum([
+  "ORDER_RECEIVED",
+  "CONFIRMED",
+  "PREPARING",
+  "READY_FOR_DISPATCH",
+  "DISPATCHED",
+  "DELIVERED",
+  "DELIVERY_FAILED",
+  "READY_FOR_PICKUP",
+  "COLLECTED",
+  "CANCELLED",
+]);
+
+export const updateFulfillmentSchema = z
+  .object({
+    status: fulfillmentStatusSchema,
+    courierName: z.string().trim().min(1).max(200).nullable().optional(),
+    courierPhone: z.string().trim().min(1).max(30).nullable().optional(),
+    shipmentReference: z.string().trim().min(1).max(200).nullable().optional(),
+    trackingUrl: z.url().refine((url) => url.startsWith("https://"), "trackingUrl must use HTTPS").nullable().optional(),
+    note: z.string().trim().min(1).max(500).nullable().optional(),
+  })
+  .strict();
+
+export type UpdateFulfillmentInput = z.infer<typeof updateFulfillmentSchema>;
+
 /**
  * POS money field: number or decimal string, normalized to a "0.00"
  * string. Accepts 0.00 (a zero discount / a credit sale with nothing

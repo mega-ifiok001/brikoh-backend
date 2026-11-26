@@ -505,6 +505,7 @@ export async function initiateCheckout(
         customerId: customer.id,
         orderNumber,
         status: "PENDING",
+        fulfillmentEvents: { create: { status: "ORDER_RECEIVED", source: "SYSTEM" } },
         total,
         discountAmount,
         discountId: discount?.id ?? null,
@@ -663,6 +664,14 @@ export interface OrderSummary {
     instructions: string | null;
     fee: string;
   } | null;
+  fulfillment: {
+    status: $Enums.FulfillmentStatus;
+    provider: string | null;
+    courierName: string | null;
+    courierPhone: string | null;
+    shipmentReference: string | null;
+    trackingUrl: string | null;
+  };
   createdAt: Date;
 }
 
@@ -741,6 +750,12 @@ export async function listOrders(storeId: string, params: ListOrdersParams): Pro
       id: true,
       orderNumber: true,
       status: true,
+      fulfillmentStatus: true,
+      deliveryProvider: true,
+      courierName: true,
+      courierPhone: true,
+      shipmentReference: true,
+      trackingUrl: true,
       paymentMethod: true,
       source: true,
       total: true,
@@ -790,6 +805,14 @@ export async function listOrders(storeId: string, params: ListOrdersParams): Pro
                 .join(" ") || row.soldByStaff.account.email,
           },
     delivery: deliverySnapshotOf(row),
+    fulfillment: {
+      status: row.fulfillmentStatus,
+      provider: row.deliveryProvider,
+      courierName: row.courierName,
+      courierPhone: row.courierPhone,
+      shipmentReference: row.shipmentReference,
+      trackingUrl: row.trackingUrl,
+    },
     createdAt: row.createdAt,
   }));
 
@@ -828,6 +851,12 @@ export async function getOrderDetail(storeId: string, orderId: string): Promise<
       id: true,
       orderNumber: true,
       status: true,
+      fulfillmentStatus: true,
+      deliveryProvider: true,
+      courierName: true,
+      courierPhone: true,
+      shipmentReference: true,
+      trackingUrl: true,
       paymentMethod: true,
       source: true,
       total: true,
@@ -902,6 +931,14 @@ export async function getOrderDetail(storeId: string, orderId: string): Promise<
                   .join(" ") || row.soldByStaff.account.email,
             },
       delivery: deliverySnapshotOf(row),
+      fulfillment: {
+        status: row.fulfillmentStatus,
+        provider: row.deliveryProvider,
+        courierName: row.courierName,
+        courierPhone: row.courierPhone,
+        shipmentReference: row.shipmentReference,
+        trackingUrl: row.trackingUrl,
+      },
       createdAt: row.createdAt,
     },
     repayments: row.creditRepayments.map((repayment) => ({
@@ -945,6 +982,13 @@ export async function getOrderDetail(storeId: string, orderId: string): Promise<
 export interface PublicOrderView {
   id: string;
   status: $Enums.OrderStatus;
+  fulfillment: {
+    status: $Enums.FulfillmentStatus;
+    courierName: string | null;
+    shipmentReference: string | null;
+    trackingUrl: string | null;
+    events: { status: $Enums.FulfillmentStatus; createdAt: Date }[];
+  };
   paymentProvider: string | null;
   paymentReference: string | null;
   bankDetails: {
@@ -972,6 +1016,14 @@ export async function getPublicOrder(orderId: string): Promise<PublicOrderView> 
     select: {
       id: true,
       status: true,
+      fulfillmentStatus: true,
+      courierName: true,
+      shipmentReference: true,
+      trackingUrl: true,
+      fulfillmentEvents: {
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        select: { status: true, createdAt: true },
+      },
       paymentProvider: true,
       paymentReference: true,
       bankName: true,
@@ -993,6 +1045,13 @@ export async function getPublicOrder(orderId: string): Promise<PublicOrderView> 
   return {
     id: order.id,
     status: order.status,
+    fulfillment: {
+      status: order.fulfillmentStatus,
+      courierName: order.courierName,
+      shipmentReference: order.shipmentReference,
+      trackingUrl: order.trackingUrl,
+      events: order.fulfillmentEvents,
+    },
     paymentProvider: order.paymentProvider,
     paymentReference: order.paymentReference,
     bankDetails:

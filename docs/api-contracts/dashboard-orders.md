@@ -73,12 +73,23 @@ Status: `200`
       "customer": { "id": "019f...", "name": "Ade Okafor", "phone": "+234..." },
       "branch": { "id": "019f...", "name": "Main Branch" },
       "soldBy": { "id": "019f...", "name": "Chidi Manager" },
-      "createdAt": "2026-08-12T10:00:00.000Z"
+      "createdAt": "2026-08-12T10:00:00.000Z",
+      "fulfillment": {
+        "status": "ORDER_RECEIVED",
+        "provider": null,
+        "courierName": null,
+        "courierPhone": null,
+        "shipmentReference": null,
+        "trackingUrl": null
+      }
     }
   ],
   "nextCursor": "019f... | null"
 }
 ```
+
+Merchant fulfilment transitions and the append-only timeline are documented
+in [dashboard-order-fulfillment.md](dashboard-order-fulfillment.md).
 
 - `balanceDue` — the outstanding credit balance for `CREDIT` orders
   (`total - amountPaid`); `0.00` for every other payment method.

@@ -22,6 +22,13 @@ misdirect an in-flight payment.
 {
   "id": "string — the order's public UUID (the path param)",
   "status": "PENDING | AWAITING_PAYMENT | PAID | SHIPPED | CANCELLED | REFUNDED | FAILED",
+  "fulfillment": {
+    "status": "ORDER_RECEIVED | CONFIRMED | PREPARING | READY_FOR_DISPATCH | DISPATCHED | DELIVERED | DELIVERY_FAILED | READY_FOR_PICKUP | COLLECTED | CANCELLED",
+    "courierName": "string | null",
+    "shipmentReference": "string | null",
+    "trackingUrl": "https://... | null",
+    "events": [{ "status": "CONFIRMED", "createdAt": "UTC ISO-8601" }]
+  },
   "paymentProvider": "bank_transfer",
   "paymentReference": "BRK-XXXXXXXXXX",
   "bankDetails": {

@@ -5,11 +5,13 @@ import {
   checkoutHandler,
   confirmPaymentHandler,
   getOrderHandler,
+  getFulfillmentHandler,
   getPublicOrderHandler,
   listOrdersHandler,
   markPaidHandler,
   recordPosSaleHandler,
   rejectPaymentHandler,
+  updateFulfillmentHandler,
 } from "./controller.js";
 
 const checkoutRouter: Router = Router();
@@ -29,6 +31,12 @@ const ordersRouter: Router = Router();
 ordersRouter.post("/", rateLimit({ windowMs: 60_000, max: 60 }), recordPosSaleHandler);
 ordersRouter.get("/", listOrdersHandler);
 ordersRouter.get("/:orderId", getOrderHandler);
+ordersRouter.get("/:orderId/fulfillment", getFulfillmentHandler);
+ordersRouter.patch(
+  "/:orderId/fulfillment",
+  rateLimit({ windowMs: 60_000, max: 60 }),
+  updateFulfillmentHandler,
+);
 // Bank-transfer confirm/reject. Awaiting-payment orders are confirmed here by
 // the merchant after the customer marks the transfer paid.
 ordersRouter.post("/:orderId/confirm-payment", confirmPaymentHandler);
