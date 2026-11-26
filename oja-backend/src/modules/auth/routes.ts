@@ -26,7 +26,9 @@ authRouter.post("/register", rateLimit({ windowMs: 60_000, max: 10 }), registerH
 authRouter.post("/login", loginHandler);
 authRouter.post("/pin-login", rateLimit({ windowMs: 60_000, max: 10 }), pinLoginHandler);
 authRouter.post("/google", googleSignInHandler);
-authRouter.post("/refresh", refreshHandler);
+// A mobile client normally refreshes only once per access-token lifetime.
+// Keep retries bounded so a broken client cannot hammer token verification.
+authRouter.post("/refresh", rateLimit({ windowMs: 60_000, max: 10 }), refreshHandler);
 authRouter.post("/logout", logoutHandler);
 // Email/code pairs are the credential; the short-lived OTP is purpose-bound
 // to the email and account, and verified once.

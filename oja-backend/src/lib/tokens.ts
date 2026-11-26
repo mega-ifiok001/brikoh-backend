@@ -55,7 +55,11 @@ export function verifyAccessToken(token: string): AccessTokenPayload {
     payload = jwt.verify(token, env.JWT_SECRET, { algorithms: ["HS256"] });
   } catch (err) {
     if (err instanceof jwt.TokenExpiredError) {
-      throw new AppError(401, "SESSION_EXPIRED", "Your session has expired — please log in again");
+      throw new AppError(
+        401,
+        "SESSION_EXPIRED",
+        "Access token expired — renew the session using POST /api/public/auth/refresh",
+      );
     }
     throw new AppError(401, "INVALID_TOKEN", "Invalid access token — please log in again");
   }
