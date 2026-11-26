@@ -20,6 +20,9 @@ import {
   getMe,
   googleSignIn,
   login,
+  loginWithPin,
+  setAccountPin,
+  getAccountPinStatus,
   logout,
   onboardAccount,
   refresh,
@@ -107,6 +110,21 @@ export async function loginHandler(req: Request, res: Response, next: NextFuncti
   } catch (err) {
     next(err);
   }
+}
+
+/** POST /api/public/auth/pin-login */
+export async function pinLoginHandler(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try { res.status(200).json(await loginWithPin(req.body)); } catch (err) { next(err); }
+}
+
+/** GET/PUT /api/dashboard/settings/pin */
+export async function pinStatusHandler(req: Request, res: Response, next: NextFunction): Promise<void> {
+  if (!req.account) { next(new AppError(401, "UNAUTHORIZED", "Authentication required")); return; }
+  try { res.status(200).json(await getAccountPinStatus(req.account.accountId)); } catch (err) { next(err); }
+}
+export async function setPinHandler(req: Request, res: Response, next: NextFunction): Promise<void> {
+  if (!req.account) { next(new AppError(401, "UNAUTHORIZED", "Authentication required")); return; }
+  try { await setAccountPin(req.account.accountId, req.body); res.status(200).json({ ok: true }); } catch (err) { next(err); }
 }
 
 /** POST /api/public/auth/google */

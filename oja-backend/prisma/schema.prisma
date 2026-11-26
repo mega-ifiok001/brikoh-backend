@@ -28,6 +28,25 @@ enum OrderStatus {
   FAILED
 }
 
+enum FulfillmentStatus {
+  ORDER_RECEIVED
+  CONFIRMED
+  PREPARING
+  READY_FOR_DISPATCH
+  DISPATCHED
+  DELIVERED
+  DELIVERY_FAILED
+  READY_FOR_PICKUP
+  COLLECTED
+  CANCELLED
+}
+
+enum FulfillmentEventSource {
+  MERCHANT
+  SHIPBUBBLE
+  SYSTEM
+}
+
 enum SubscriptionTier {
   STARTER
   PRO
@@ -296,8 +315,20 @@ model Account {
   refreshTokens        RefreshToken[]
   otpChallenges       OtpChallenge[]
   passwordResetTokens  PasswordResetToken[]
+  pinCredential       AccountPinCredential?
   supportTicketsRaised SupportTicket[]            @relation("TicketRaisedBy")
   ticketMessages       TicketMessage[]            @relation("TicketMessageAccountAuthor")
+}
+
+// Six-digit account PIN for mobile sign-in. Never store the PIN itself.
+model AccountPinCredential {
+  id             String    @id @default(uuid(7)) @db.Uuid
+  accountId      String    @unique @db.Uuid
+  account        Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  pinHash        String
+  failedAttempts Int       @default(0)
+  lockedUntil    DateTime? @db.Timestamptz(3)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(3)
 }
 
 // Purpose-bound email OTP challenges. Only an HMAC digest of the 6-digit code
@@ -467,6 +498,10 @@ model Store {
   walletEntries             WalletEntry[]
   bankAccounts              BankAccount[]
   deliveryOptions           DeliveryOption[]
+  shipbubbleConfig          ShipbubbleStoreConfig?
+  shipbubbleAddressCache    ShipbubbleAddressCache[]
+  shipbubbleRateQuotes      ShipbubbleRateQuote[]
+  shipbubbleShipments       ShipbubbleShipment[]
   payouts                   Payout[]
   expenses                  Expense[]
   supportTickets            SupportTicket[]
@@ -618,6 +653,9 @@ model Product {
   // the promotional price shown instead. The service layer rejects a
   // discountPrice >= price (a discount must discount).
   discountPrice     Decimal?      @db.Decimal(10, 2)
+  // Per-unit shipping weight in kilograms for live Shipbubble rates.
+  // Optional for manual-only products; Shipbubble checkout requires it.
+  shippingWeightKg  Decimal?      @db.Decimal(10, 3)
   // Stock-alert trigger: when cached stock drops to or below this value
   // after a decrement, a LOW_STOCK notification is raised (notifications
   // module). Null = no alerts for this product.
@@ -1113,6 +1151,7 @@ model Order {
   customerId           String          @db.Uuid
   customer             Customer        @relation(fields: [customerId], references: [id], onDelete: Restrict)
   status               OrderStatus     @default(PENDING)
+  fulfillmentStatus    FulfillmentStatus @default(ORDER_RECEIVED)
   total                Decimal         @db.Decimal(10, 2)
   // Cart-level discount applied at sale time (POS record-sale). Line
   // totals are the undiscounted captured prices; this is the one
@@ -1146,6 +1185,9 @@ model Order {
   // echoed by the provider.
   paymentProvider      String?
   paymentReference     String?
+  // Paystack transaction fee in NGN. Null for legacy rows or providers
+  // that do not include a fee in the signed charge.success event.
+  paymentFee           Decimal?        @db.Decimal(10, 2)
   authorizationUrl     String?
   // Set when the customer clicks "I have paid" on a bank-transfer order.
   paymentSubmittedAt   DateTime?       @db.Timestamptz(3)
@@ -1182,6 +1224,15 @@ model Order {
   deliveryState        String?         @db.VarChar(120)
   deliveryPhone        String?         @db.VarChar(30)
   deliveryInstructions String?         @db.VarChar(500)
+  deliveryProvider     String?         @db.VarChar(40)
+  shipbubbleCourierId  String?         @db.VarChar(100)
+  shipbubbleServiceCode String?        @db.VarChar(100)
+  shipbubbleRateQuoteId String?        @unique @db.Uuid
+  shipbubbleRateQuote  ShipbubbleRateQuote? @relation("OrderRateQuote", fields: [shipbubbleRateQuoteId], references: [id], onDelete: SetNull)
+  courierName          String?         @db.VarChar(200)
+  courierPhone         String?         @db.VarChar(30)
+  shipmentReference    String?         @db.VarChar(200)
+  trackingUrl          String?         @db.VarChar(2048)
   // The branch whose stock this order decrements on payment
   // confirmation (the store's default branch at initiation). Restrict on
   // branch: financial history must keep its attribution, so a branch with
@@ -1202,6 +1253,8 @@ model Order {
   lineItems        OrderLineItem[]
   creditRepayments CreditRepayment[]
   walletEntries    WalletEntry[]
+  fulfillmentEvents OrderFulfillmentEvent[]
+  shipbubbleShipment ShipbubbleShipment?
   couponRedemption CouponRedemption?
 
   @@unique([storeId, paymentReference])
@@ -1214,6 +1267,88 @@ model Order {
   @@index([storeId, createdAt, status])
   @@index([storeId, paidAt])
   @@index([bankAccountId])
+}
+
+model OrderFulfillmentEvent {
+  id               String                 @id @default(uuid(7)) @db.Uuid
+  orderId          String                 @db.Uuid
+  order            Order                  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status           FulfillmentStatus
+  source           FulfillmentEventSource @default(MERCHANT)
+  note             String?                @db.VarChar(500)
+  actorStaffId     String?                @db.Uuid
+  courierName      String?                @db.VarChar(200)
+  shipmentReference String?               @db.VarChar(200)
+  idempotencyKey   String?                @unique @db.VarChar(200)
+  createdAt        DateTime               @default(now()) @db.Timestamptz(3)
+
+  @@index([orderId, createdAt])
+}
+
+model ShipbubbleStoreConfig {
+  id                  String   @id @default(uuid(7)) @db.Uuid
+  storeId             String   @unique @db.Uuid
+  store               Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  senderAddressCode   Int
+  categoryId          Int
+  packageLengthCm     Decimal  @db.Decimal(8, 2)
+  packageWidthCm      Decimal  @db.Decimal(8, 2)
+  packageHeightCm     Decimal  @db.Decimal(8, 2)
+  createdAt           DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime @updatedAt @db.Timestamptz(3)
+}
+
+model ShipbubbleAddressCache {
+  id               String   @id @default(uuid(7)) @db.Uuid
+  storeId          String   @db.Uuid
+  store            Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  fingerprint      String   @db.VarChar(64)
+  addressCode      Int
+  formattedAddress String?  @db.VarChar(500)
+  createdAt        DateTime @default(now()) @db.Timestamptz(3)
+  @@unique([storeId, fingerprint])
+}
+
+model ShipbubbleRateQuote {
+  id                     String   @id @default(uuid(7)) @db.Uuid
+  storeId                String   @db.Uuid
+  store                  Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  requestToken           String   @db.VarChar(200)
+  deliveryOptionId       String   @db.Uuid
+  deliveryOption         DeliveryOption @relation(fields: [deliveryOptionId], references: [id], onDelete: Cascade)
+  cartFingerprint        String   @db.VarChar(64)
+  destinationFingerprint String   @db.VarChar(64)
+  courierRates           Json
+  expiresAt              DateTime @db.Timestamptz(3)
+  consumedAt             DateTime? @db.Timestamptz(3)
+  createdAt              DateTime @default(now()) @db.Timestamptz(3)
+  order                  Order?   @relation("OrderRateQuote")
+  @@index([storeId, expiresAt])
+}
+
+model ShipbubbleShipment {
+  id                     String                 @id @default(uuid(7)) @db.Uuid
+  storeId                String                 @db.Uuid
+  store                  Store                  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  orderId                String                 @unique @db.Uuid
+  order                  Order                  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  providerOrderId        String?                @unique @db.VarChar(200)
+  requestToken           String                 @db.VarChar(200)
+  courierId              String                 @db.VarChar(100)
+  serviceCode            String                 @db.VarChar(100)
+  courierName            String                 @db.VarChar(200)
+  customerFee            Decimal                @db.Decimal(10, 2)
+  providerFee            Decimal?               @db.Decimal(10, 2)
+  currency               String                 @default("NGN") @db.VarChar(8)
+  bookingState           ShipbubbleBookingState @default(CREATING)
+  providerStatus         String?                @db.VarChar(80)
+  trackingUrl            String?                @db.VarChar(2048)
+  waybillUrl             String?                @db.VarChar(2048)
+  providerResponse       Json?
+  lastWebhookFingerprint String?                @db.VarChar(64)
+  createdAt              DateTime               @default(now()) @db.Timestamptz(3)
+  updatedAt              DateTime               @updatedAt @db.Timestamptz(3)
+  @@index([storeId, createdAt])
 }
 
 // APPEND-ONLY credit-repayment records: money applied against a CREDIT
@@ -1696,6 +1831,19 @@ enum DeliveryKind {
   DELIVERY
 }
 
+enum DeliveryProvider {
+  MANUAL
+  SHIPBUBBLE
+}
+
+enum ShipbubbleBookingState {
+  CREATING
+  BOOKED
+  FAILED
+  UNKNOWN
+  CANCELLED
+}
+
 // A merchant-configured fulfilment choice ("Pick up at store", "Delivery
 // Rider — ₦2,000"). The buyer's fee is this option's `baseFee` — never a
 // client-supplied amount. Pickup options may reuse a store Location
@@ -1709,6 +1857,7 @@ model DeliveryOption {
   store             Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
   name              String       @db.VarChar(200)
   kind              DeliveryKind
+  provider          DeliveryProvider @default(MANUAL)
   description       String?      @db.VarChar(500)
   // The flat fee charged when this option is chosen.
   baseFee           Decimal      @default(0) @db.Decimal(10, 2)
@@ -1723,6 +1872,7 @@ model DeliveryOption {
   updatedAt         DateTime     @updatedAt @db.Timestamptz(3)
 
   orders Order[]
+  shipbubbleRateQuotes ShipbubbleRateQuote[]
 
   @@unique([storeId, name])
   @@index([storeId])

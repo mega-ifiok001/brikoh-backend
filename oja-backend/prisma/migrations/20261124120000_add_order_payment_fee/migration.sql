@@ -1,0 +1,2 @@
+ALTER TABLE "Order"
+ADD COLUMN "paymentFee" DECIMAL(10,2);

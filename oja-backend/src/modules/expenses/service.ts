@@ -72,11 +72,8 @@ export async function listExpenses(storeId: string, query: unknown): Promise<Exp
   if (params.category !== undefined) {
     where.category = params.category;
   }
-  if (params.from !== undefined || params.to !== undefined) {
-    where.date = {
-      ...(params.from !== undefined ? { gte: parseExpenseDate(params.from) } : {}),
-      ...(params.to !== undefined ? { lte: parseExpenseDate(params.to) } : {}),
-    };
+  if (params.date !== undefined) {
+    where.date = parseExpenseDate(params.date);
   }
   if (params.cursor !== undefined) {
     where.id = { lt: params.cursor };

@@ -96,6 +96,7 @@ export const deliveryOptionCreateSchema = z
   .object({
     name: deliveryOptionNameSchema,
     kind: z.enum(["PICKUP", "DELIVERY"], { error: "kind must be PICKUP or DELIVERY" }),
+    provider: z.enum(["MANUAL", "SHIPBUBBLE"]).optional().default("MANUAL"),
     description: z
       .string()
       .trim()
@@ -125,3 +126,21 @@ export const deliveryOptionUpdateSchema = deliveryOptionCreateSchema
   .partial()
   .refine((data) => Object.keys(data).length > 0, { message: "at least one field is required" });
 export type DeliveryOptionUpdateInput = z.infer<typeof deliveryOptionUpdateSchema>;
+
+export const shipbubbleConfigSchema = z
+  .object({
+    sender: z.object({
+      name: z.string().trim().min(1).max(200),
+      email: z.email(),
+      phone: z.string().trim().min(1).max(30),
+      address: z.string().trim().min(5).max(500),
+    }).strict(),
+    categoryId: z.number().int().positive(),
+    packageDimension: z.object({
+      length: z.number().positive().max(10000),
+      width: z.number().positive().max(10000),
+      height: z.number().positive().max(10000),
+    }).strict(),
+  })
+  .strict();
+export type ShipbubbleConfigInput = z.infer<typeof shipbubbleConfigSchema>;

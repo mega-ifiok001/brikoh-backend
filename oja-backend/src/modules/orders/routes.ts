@@ -3,13 +3,18 @@ import { resolvePublicStore } from "../../middleware/resolvePublicStore.js";
 import { rateLimit } from "../../middleware/rateLimit.js";
 import {
   checkoutHandler,
+  bookShipbubbleShipmentHandler,
+  cancelShipbubbleShipmentHandler,
   confirmPaymentHandler,
   getOrderHandler,
+  getFulfillmentHandler,
   getPublicOrderHandler,
   listOrdersHandler,
   markPaidHandler,
   recordPosSaleHandler,
   rejectPaymentHandler,
+  updateFulfillmentHandler,
+  shipbubbleRatesHandler,
 } from "./controller.js";
 
 const checkoutRouter: Router = Router();
@@ -17,6 +22,12 @@ const checkoutRouter: Router = Router();
 // The subdomain is the tenant's public address; resolvePublicStore
 // resolves it and rejects unknown subdomains before any logic runs.
 checkoutRouter.post("/:subdomain", resolvePublicStore, checkoutHandler);
+checkoutRouter.post(
+  "/:subdomain/shipping-rates",
+  resolvePublicStore,
+  rateLimit({ windowMs: 60_000, max: 10 }),
+  shipbubbleRatesHandler,
+);
 
 /**
  * Dashboard orders (mount: /api/dashboard/orders — authenticate +
@@ -29,6 +40,22 @@ const ordersRouter: Router = Router();
 ordersRouter.post("/", rateLimit({ windowMs: 60_000, max: 60 }), recordPosSaleHandler);
 ordersRouter.get("/", listOrdersHandler);
 ordersRouter.get("/:orderId", getOrderHandler);
+ordersRouter.get("/:orderId/fulfillment", getFulfillmentHandler);
+ordersRouter.patch(
+  "/:orderId/fulfillment",
+  rateLimit({ windowMs: 60_000, max: 60 }),
+  updateFulfillmentHandler,
+);
+ordersRouter.post(
+  "/:orderId/shipbubble/book",
+  rateLimit({ windowMs: 60_000, max: 10 }),
+  bookShipbubbleShipmentHandler,
+);
+ordersRouter.post(
+  "/:orderId/shipbubble/cancel",
+  rateLimit({ windowMs: 60_000, max: 10 }),
+  cancelShipbubbleShipmentHandler,
+);
 // Bank-transfer confirm/reject. Awaiting-payment orders are confirmed here by
 // the merchant after the customer marks the transfer paid.
 ordersRouter.post("/:orderId/confirm-payment", confirmPaymentHandler);

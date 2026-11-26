@@ -137,6 +137,10 @@ const envSchema = z.object({
   PAYMENT_ENCRYPTION_KEY: z
     .string()
     .regex(/^[0-9a-fA-F]{64}$/, "PAYMENT_ENCRYPTION_KEY must be 64 hex chars (32 bytes)"),
+  SHIPBUBBLE_API_KEY: z.string().min(1).optional(),
+  SHIPBUBBLE_MODE: z.enum(["sandbox", "live"]).default("sandbox"),
+  SHIPBUBBLE_ENABLE_LIVE: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  SHIPBUBBLE_WEBHOOK_SECRET: z.string().min(32).optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

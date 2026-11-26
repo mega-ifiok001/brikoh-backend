@@ -31,7 +31,6 @@ import {
   register,
   resendVerification,
   verifyEmail,
-  verifyPasswordResetOtp,
 } from "./service.js";
 import type { VerificationEmailData, VerificationEmailSender } from "./service.js";
 import type { GoogleOAuthClient, GoogleProfile } from "./google.js";

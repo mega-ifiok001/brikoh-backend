@@ -63,6 +63,9 @@ export const checkoutSchema = z
     // kinds. The fee always comes from the option's baseFee — never a
     // client-supplied amount.
     deliveryOptionId: z.string().uuid("deliveryOptionId must be a valid UUID").optional(),
+    shipbubbleQuoteId: z.string().uuid("shipbubbleQuoteId must be a valid UUID").optional(),
+    shipbubbleCourierId: z.string().trim().min(1).max(100).optional(),
+    shipbubbleServiceCode: z.string().trim().min(1).max(100).optional(),
     deliveryAddress: z
       .string()
       .trim()
@@ -96,6 +99,44 @@ export const checkoutSchema = z
   .strict();
 
 export type CheckoutInput = z.infer<typeof checkoutSchema>;
+
+export const shipbubbleRatesSchema = z.object({
+  customer: checkoutCustomerSchema,
+  items: checkoutSchema.shape.items,
+  deliveryOptionId: z.string().uuid(),
+  deliveryAddress: z.string().trim().min(1).max(500),
+  deliveryCity: z.string().trim().min(1).max(120),
+  deliveryState: z.string().trim().min(1).max(120),
+  deliveryPhone: z.string().trim().min(1).max(30),
+  deliveryInstructions: z.string().trim().max(500).optional(),
+}).strict();
+export type ShipbubbleRatesInput = z.infer<typeof shipbubbleRatesSchema>;
+
+export const fulfillmentStatusSchema = z.enum([
+  "ORDER_RECEIVED",
+  "CONFIRMED",
+  "PREPARING",
+  "READY_FOR_DISPATCH",
+  "DISPATCHED",
+  "DELIVERED",
+  "DELIVERY_FAILED",
+  "READY_FOR_PICKUP",
+  "COLLECTED",
+  "CANCELLED",
+]);
+
+export const updateFulfillmentSchema = z
+  .object({
+    status: fulfillmentStatusSchema,
+    courierName: z.string().trim().min(1).max(200).nullable().optional(),
+    courierPhone: z.string().trim().min(1).max(30).nullable().optional(),
+    shipmentReference: z.string().trim().min(1).max(200).nullable().optional(),
+    trackingUrl: z.url().refine((url) => url.startsWith("https://"), "trackingUrl must use HTTPS").nullable().optional(),
+    note: z.string().trim().min(1).max(500).nullable().optional(),
+  })
+  .strict();
+
+export type UpdateFulfillmentInput = z.infer<typeof updateFulfillmentSchema>;
 
 /**
  * POS money field: number or decimal string, normalized to a "0.00"
@@ -166,8 +207,14 @@ export const listOrdersParamsSchema = z.object({
     .optional(),
   paymentMethod: z.enum(["CASH", "TRANSFER", "CREDIT", "CARD"]).optional(),
   source: z.enum(["STOREFRONT", "POS"]).optional(),
-  start: z.iso.datetime({ offset: true }).optional(),
-  end: z.iso.datetime({ offset: true }).optional(),
+  date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "date must use YYYY-MM-DD format")
+    .refine((value) => {
+      const parsed = new Date(`${value}T00:00:00.000Z`);
+      return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+    }, "date must be a valid calendar date")
+    .optional(),
   q: z
     .string()
     .trim()

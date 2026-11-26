@@ -3,9 +3,11 @@ import { rateLimit } from "../../middleware/rateLimit.js";
 import {
   createBankAccountHandler,
   createDeliveryOptionHandler,
+  configureShipbubbleHandler,
   deleteDeliveryOptionHandler,
   getBusinessProfileHandler,
   getNotificationSettingsHandler,
+  getShipbubbleConfigHandler,
   listBankAccountsHandler,
   listDeliveryOptionsHandler,
   updateBusinessProfileHandler,
@@ -38,5 +40,7 @@ settingsRouter.delete(
   deliveryWriteLimit,
   deleteDeliveryOptionHandler,
 );
+settingsRouter.get("/shipbubble", getShipbubbleConfigHandler);
+settingsRouter.put("/shipbubble", deliveryWriteLimit, configureShipbubbleHandler);
 
 export { settingsRouter };

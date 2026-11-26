@@ -32,6 +32,9 @@ Body:
   "origin": "\"DIRECT\" | \"SOCIAL\" | \"MARKETPLACE\" | \"REFERRAL\"? — optional; how the buyer reached the storefront",
   "paymentMethod": "\"paystack\" | \"bank_transfer\"? — optional; defaults to \"paystack\"",
   "deliveryOptionId": "string? — the chosen delivery option (`dashboard-delivery-options.md`); REQUIRED when the store has any active option",
+  "shipbubbleQuoteId": "string? — required for SHIPBUBBLE; returned by the shipping-rates endpoint",
+  "shipbubbleCourierId": "string? — selected courier ID returned by shipping-rates",
+  "shipbubbleServiceCode": "string? — selected service code returned by shipping-rates",
   "deliveryAddress": "string? — the customer's street address; REQUIRED for a DELIVERY-kind option, 1-500 chars",
   "deliveryCity": "string? — REQUIRED for a DELIVERY-kind option, 1-120 chars",
   "deliveryState": "string? — REQUIRED for a DELIVERY-kind option, 1-120 chars",
@@ -87,9 +90,11 @@ Notes:
   `deliveryState`, and `deliveryPhone` are all required (missing any →
   `400 DELIVERY_DETAILS_REQUIRED`); `deliveryInstructions` is optional. A
   `PICKUP` option needs none of these — its location lives on the option
-  itself. The **fee** is the option's own `baseFee`, read from the database
-  server-side (a client-supplied fee is never trusted) and added to the
-  order total; the option name, fee, and address are frozen on the order.
+  itself. For MANUAL/PICKUP, the **fee** is the option's own `baseFee`; for
+  SHIPBUBBLE, it comes from the selected, unexpired server quote. A
+  client-supplied fee is never trusted. The option name, fee, and address are
+  frozen on the order. SHIPBUBBLE quotes expire after 15 minutes and are
+  single-use; cart or destination changes require a new quote.
   `order.total` = line items − discount + delivery fee.
 - **Payment method selection** (`paymentMethod`, defaults to `"paystack"`):
   - `"paystack"` — the default. A provider charge is initiated and the

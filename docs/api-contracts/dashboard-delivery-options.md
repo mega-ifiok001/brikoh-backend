@@ -21,9 +21,9 @@ has a **kind** (`PICKUP` or `DELIVERY`), a flat **base fee**, and an optional
 pickup location. The buyer's delivery fee is simply the option's `baseFee`,
 read from the database at checkout — a client-supplied fee is never trusted.
 
-Phase 1 is deliberately flat: **no zones, zone fees, distance pricing, maps,
-or logistics integration**. The shape leaves room for a richer pricing model
-later.
+Manual delivery and pickup use the configured flat fee. Shipbubble delivery
+uses live courier quotes requested by the buyer; `baseFee` is stored as zero
+for those options and is not the checkout shipping price.
 
 The storefront advertises the active options via
 `GET /api/public/storefront/:subdomain` (`public-storefront.md`) and the
@@ -38,6 +38,7 @@ option additionally requires the customer's address, city, state, and phone.
   "id": "string — uuid (v7)",
   "name": "string — 1-200 chars, unique per store, e.g. \"Delivery Rider\"",
   "kind": "\"PICKUP\" | \"DELIVERY\"",
+  "provider": "\"MANUAL\" | \"SHIPBUBBLE\" — defaults to MANUAL; Shipbubble is allowed only for DELIVERY",
   "description": "string | null — up to 500 chars, e.g. \"Same-day rider\"",
   "baseFee": "string — 2dp decimal, >= 0 (the flat fee charged)",
   "isActive": "boolean — false hides it from the storefront checkout",
@@ -75,6 +76,7 @@ Lists the store's options, `sortOrder` then `createdAt` ascending.
 {
   "name": "Delivery Rider",
   "kind": "DELIVERY",
+  "provider": "SHIPBUBBLE",
   "description": "Same-day rider",
   "baseFee": "2000",
   "isActive": true,
@@ -86,7 +88,9 @@ Lists the store's options, `sortOrder` then `createdAt` ascending.
 
 - `name` — `1..200` chars, trimmed, unique per store (`409 DELIVERY_OPTION_EXISTS` on a collision).
 - `kind` — required, `PICKUP` or `DELIVERY`.
+- `provider` — optional, defaults to `MANUAL`; set `SHIPBUBBLE` to request live provider rates. It requires a configured platform Shipbubble key and store pickup/package settings.
 - `baseFee` — number or decimal string, `>= 0`, max `99999999.99`, at most 2dp; defaults to `0`.
+- Shipbubble options must use `kind: DELIVERY`; their `baseFee` is forced to `0`. Checkout receives the selected quote fee from the server.
 - `isActive` — optional, defaults `true`.
 
 ### Success response — `201` — the Option shape.

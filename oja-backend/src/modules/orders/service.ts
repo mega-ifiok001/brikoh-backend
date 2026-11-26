@@ -30,6 +30,7 @@ import {
   type CheckoutInput,
   type ListOrdersParams,
 } from "./schemas.js";
+import { verifyShipbubbleCheckoutQuote, type SelectedShipbubbleRate } from "./shipbubble.service.js";
 
 /**
  * ============================================================
@@ -75,6 +76,13 @@ export interface CheckoutResult {
     discountAmount: string;
     discountId: string | null;
     status: $Enums.OrderStatus;
+    delivery: {
+      kind: $Enums.DeliveryKind;
+      optionName: string;
+      fee: string;
+      provider: "manual" | "shipbubble";
+      courierName: string | null;
+    } | null;
   };
   payment: {
     provider: string;
@@ -424,9 +432,18 @@ export async function initiateCheckout(
     deliveryState: string | null;
     deliveryPhone: string | null;
     deliveryInstructions: string | null;
+    deliveryProvider: string;
+    courierName?: string;
+    shipbubbleCourierId?: string;
+    shipbubbleServiceCode?: string;
+    shipbubbleRateQuoteId?: string;
   } | null = null;
+  let selectedShipbubbleRate: SelectedShipbubbleRate | null = null;
 
   if (data.deliveryOptionId === undefined) {
+    if (data.shipbubbleQuoteId !== undefined || data.shipbubbleCourierId !== undefined || data.shipbubbleServiceCode !== undefined) {
+      throw new AppError(400, "VALIDATION_ERROR", "Shipbubble quote fields require a delivery option");
+    }
     if (activeOptionCount > 0) {
       throw new AppError(
         409,
@@ -437,7 +454,7 @@ export async function initiateCheckout(
   } else {
     const option = await prisma.deliveryOption.findFirst({
       where: { id: data.deliveryOptionId, storeId, isActive: true },
-      select: { id: true, kind: true, name: true, baseFee: true },
+      select: { id: true, kind: true, provider: true, name: true, baseFee: true },
     });
     if (option === null) {
       throw new AppError(
@@ -472,24 +489,92 @@ export async function initiateCheckout(
       phone = data.deliveryPhone!;
       instructions = data.deliveryInstructions ?? null;
     }
-    deliveryFee = option.baseFee;
+    if (option.provider === "SHIPBUBBLE") {
+      if (
+        data.shipbubbleQuoteId === undefined ||
+        data.shipbubbleCourierId === undefined ||
+        data.shipbubbleServiceCode === undefined
+      ) {
+        throw new AppError(400, "SHIPBUBBLE_QUOTE_REQUIRED", "Choose a current Shipbubble courier quote before checkout");
+      }
+      const config = await prisma.shipbubbleStoreConfig.findUnique({ where: { storeId } });
+      if (config === null) throw new AppError(409, "SHIPBUBBLE_NOT_CONFIGURED", "This store has not configured Shipbubble");
+      selectedShipbubbleRate = await verifyShipbubbleCheckoutQuote({
+        storeId,
+        optionId: option.id,
+        quoteId: data.shipbubbleQuoteId,
+        courierId: data.shipbubbleCourierId,
+        serviceCode: data.shipbubbleServiceCode,
+        quantities,
+        context: ctx,
+        config,
+        destination: {
+          name: data.customer.name,
+          email: data.customer.email,
+          phone: phone!,
+          address: address!,
+          city: city!,
+          state: state!,
+          instructions: instructions ?? undefined,
+        },
+      });
+      deliveryFee = new Prisma.Decimal(selectedShipbubbleRate.customerFee);
+    } else {
+      if (data.shipbubbleQuoteId !== undefined || data.shipbubbleCourierId !== undefined || data.shipbubbleServiceCode !== undefined) {
+        throw new AppError(400, "VALIDATION_ERROR", "Shipbubble quote fields require a Shipbubble delivery option");
+      }
+      deliveryFee = option.baseFee;
+    }
     deliverySnapshot = {
       deliveryOptionId: option.id,
       deliveryKind: option.kind,
-      deliveryOptionName: option.name,
+      deliveryOptionName: selectedShipbubbleRate === null ? option.name : `${option.name} — ${selectedShipbubbleRate.courierName}`.slice(0, 200),
       deliveryAddress: address,
       deliveryCity: city,
       deliveryState: state,
       deliveryPhone: phone,
       deliveryInstructions: instructions,
+      deliveryProvider: option.provider === "SHIPBUBBLE" ? "shipbubble" : "manual",
+      ...(selectedShipbubbleRate === null ? {} : { courierName: selectedShipbubbleRate.courierName }),
+      ...(selectedShipbubbleRate === null
+        ? {}
+        : {
+            shipbubbleCourierId: selectedShipbubbleRate.courierId,
+            shipbubbleServiceCode: selectedShipbubbleRate.serviceCode,
+            shipbubbleRateQuoteId: selectedShipbubbleRate.quoteId,
+          }),
     };
   }
 
   const total = lineTotal.sub(discountAmount).add(deliveryFee);
+  const checkoutDelivery =
+    deliverySnapshot === null
+      ? null
+      : {
+          kind: deliverySnapshot.deliveryKind,
+          optionName: deliverySnapshot.deliveryOptionName,
+          fee: deliveryFee.toFixed(2),
+          provider: deliverySnapshot.deliveryProvider as "manual" | "shipbubble",
+          courierName: selectedShipbubbleRate?.courierName ?? null,
+        };
 
   const paymentReference = generatePaymentReference();
 
   const order = await prisma.$transaction(async (tx) => {
+    if (selectedShipbubbleRate !== null) {
+      const consumed = await tx.shipbubbleRateQuote.updateMany({
+        where: {
+          id: selectedShipbubbleRate.quoteId,
+          storeId,
+          consumedAt: null,
+          expiresAt: { gt: new Date() },
+        },
+        data: { consumedAt: new Date() },
+      });
+      if (consumed.count !== 1) {
+        throw new AppError(409, "SHIPBUBBLE_QUOTE_ALREADY_USED", "That delivery quote expired or was already used; request new rates");
+      }
+    }
     // Coupon rules (maxUses / perCustomerUses / minSubtotal /
     // firstOrderOnly) are enforced before the order write; the
     // redemption row lands in the same transaction (no orphans).
@@ -505,6 +590,7 @@ export async function initiateCheckout(
         customerId: customer.id,
         orderNumber,
         status: "PENDING",
+        fulfillmentEvents: { create: { status: "ORDER_RECEIVED", source: "SYSTEM" } },
         total,
         discountAmount,
         discountId: discount?.id ?? null,
@@ -553,6 +639,7 @@ export async function initiateCheckout(
         discountAmount: discountAmount.toFixed(2),
         discountId: discount?.id ?? null,
         status: "PENDING",
+        delivery: checkoutDelivery,
       },
       payment: {
         provider: "bank_transfer",
@@ -618,6 +705,7 @@ export async function initiateCheckout(
       discountAmount: discountAmount.toFixed(2),
       discountId: discount?.id ?? null,
       status: "PENDING",
+      delivery: checkoutDelivery,
     },
     payment: {
       provider: credential.provider,
@@ -663,6 +751,14 @@ export interface OrderSummary {
     instructions: string | null;
     fee: string;
   } | null;
+  fulfillment: {
+    status: $Enums.FulfillmentStatus;
+    provider: string | null;
+    courierName: string | null;
+    courierPhone: string | null;
+    shipmentReference: string | null;
+    trackingUrl: string | null;
+  };
   createdAt: Date;
 }
 
@@ -718,11 +814,9 @@ export async function listOrders(storeId: string, params: ListOrdersParams): Pro
   if (params.status !== undefined) where.status = params.status;
   if (params.paymentMethod !== undefined) where.paymentMethod = params.paymentMethod;
   if (params.source !== undefined) where.source = params.source;
-  if (params.start !== undefined || params.end !== undefined) {
-    const range: Prisma.DateTimeFilter = {};
-    if (params.start !== undefined) range.gte = new Date(params.start);
-    if (params.end !== undefined) range.lt = new Date(params.end);
-    where.createdAt = range;
+  if (params.date !== undefined) {
+    const start = new Date(`${params.date}T00:00:00.000Z`);
+    where.createdAt = { gte: start, lt: new Date(start.getTime() + 86_400_000) };
   }
   if (params.cursor !== undefined) where.id = { lt: params.cursor };
   if (params.customerId !== undefined) where.customerId = params.customerId;
@@ -743,6 +837,12 @@ export async function listOrders(storeId: string, params: ListOrdersParams): Pro
       id: true,
       orderNumber: true,
       status: true,
+      fulfillmentStatus: true,
+      deliveryProvider: true,
+      courierName: true,
+      courierPhone: true,
+      shipmentReference: true,
+      trackingUrl: true,
       paymentMethod: true,
       source: true,
       total: true,
@@ -792,6 +892,14 @@ export async function listOrders(storeId: string, params: ListOrdersParams): Pro
                 .join(" ") || row.soldByStaff.account.email,
           },
     delivery: deliverySnapshotOf(row),
+    fulfillment: {
+      status: row.fulfillmentStatus,
+      provider: row.deliveryProvider,
+      courierName: row.courierName,
+      courierPhone: row.courierPhone,
+      shipmentReference: row.shipmentReference,
+      trackingUrl: row.trackingUrl,
+    },
     createdAt: row.createdAt,
   }));
 
@@ -830,6 +938,12 @@ export async function getOrderDetail(storeId: string, orderId: string): Promise<
       id: true,
       orderNumber: true,
       status: true,
+      fulfillmentStatus: true,
+      deliveryProvider: true,
+      courierName: true,
+      courierPhone: true,
+      shipmentReference: true,
+      trackingUrl: true,
       paymentMethod: true,
       source: true,
       total: true,
@@ -904,6 +1018,14 @@ export async function getOrderDetail(storeId: string, orderId: string): Promise<
                   .join(" ") || row.soldByStaff.account.email,
             },
       delivery: deliverySnapshotOf(row),
+      fulfillment: {
+        status: row.fulfillmentStatus,
+        provider: row.deliveryProvider,
+        courierName: row.courierName,
+        courierPhone: row.courierPhone,
+        shipmentReference: row.shipmentReference,
+        trackingUrl: row.trackingUrl,
+      },
       createdAt: row.createdAt,
     },
     repayments: row.creditRepayments.map((repayment) => ({
@@ -947,6 +1069,13 @@ export async function getOrderDetail(storeId: string, orderId: string): Promise<
 export interface PublicOrderView {
   id: string;
   status: $Enums.OrderStatus;
+  fulfillment: {
+    status: $Enums.FulfillmentStatus;
+    courierName: string | null;
+    shipmentReference: string | null;
+    trackingUrl: string | null;
+    events: { status: $Enums.FulfillmentStatus; createdAt: Date }[];
+  };
   paymentProvider: string | null;
   paymentReference: string | null;
   bankDetails: {
@@ -974,6 +1103,14 @@ export async function getPublicOrder(orderId: string): Promise<PublicOrderView> 
     select: {
       id: true,
       status: true,
+      fulfillmentStatus: true,
+      courierName: true,
+      shipmentReference: true,
+      trackingUrl: true,
+      fulfillmentEvents: {
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        select: { status: true, createdAt: true },
+      },
       paymentProvider: true,
       paymentReference: true,
       bankName: true,
@@ -995,6 +1132,13 @@ export async function getPublicOrder(orderId: string): Promise<PublicOrderView> 
   return {
     id: order.id,
     status: order.status,
+    fulfillment: {
+      status: order.fulfillmentStatus,
+      courierName: order.courierName,
+      shipmentReference: order.shipmentReference,
+      trackingUrl: order.trackingUrl,
+      events: order.fulfillmentEvents,
+    },
     paymentProvider: order.paymentProvider,
     paymentReference: order.paymentReference,
     bankDetails:

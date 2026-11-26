@@ -94,7 +94,7 @@ describe("ReportsService.getPnl", () => {
 });
 
 describe("ReportsService.getExpensesByCategory", () => {
-  it("groups by category, totals with 2 dp, sorts by total descending, echoes the range", async () => {
+  it("groups by category, totals with 2 dp, sorts by total descending, echoes the date", async () => {
     const db = createDbStub();
     db.expense.groupBy.mockResolvedValue([
       { category: "PACKAGING", _count: { _all: 4 }, _sum: { amount: D("12500.00") } },
@@ -109,10 +109,7 @@ describe("ReportsService.getExpensesByCategory", () => {
       { category: "PACKAGING", count: 4, total: "12500.00" },
     ]);
     expect(view.grandTotal).toBe("462500.00");
-    expect(view.range).toEqual({
-      start: "2026-08-01T00:00:00.000Z",
-      end: "2026-09-01T00:00:00.000Z",
-    });
+    expect(view.date).toBe("2026-08-01");
   });
 
   it("returns an empty category list for no expenses", async () => {

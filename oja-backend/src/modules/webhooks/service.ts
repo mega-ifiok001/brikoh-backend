@@ -178,6 +178,15 @@ interface EventInput {
   payload: Prisma.InputJsonValue;
 }
 
+/** Provider fees arrive in the currency's minor unit (kobo). */
+function feeFromEvent(event: EventInput, key: "fee" | "fees"): Prisma.Decimal | null {
+  const payload = event.payload as { data?: Record<string, unknown> };
+  const value = payload.data?.[key];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? new Prisma.Decimal(value).div(100)
+    : null;
+}
+
 /**
  * Records an event as already-processed without touching the order —
  * used when the order is no longer PENDING (already paid, cancelled,
@@ -220,7 +229,12 @@ async function handleChargeSuccess(
 
       // Guarded transition: only a still-PENDING order becomes PAID (and
       // the stock decrement + wallet credit only happen on that transition).
-      paid = await applyChargeSuccessEffects(tx, orderId, event.storeId);
+      paid = await applyChargeSuccessEffects(
+        tx,
+        orderId,
+        event.storeId,
+        feeFromEvent(event, "fees"),
+      );
 
       await tx.webhookEvent.update({
         where: { id: created.id },
@@ -264,12 +278,16 @@ export async function markOrderPaidAndDecrementStock(
   opts: {
     fromStatus?: "PENDING" | "AWAITING_PAYMENT";
     amountPaid?: Prisma.Decimal | null;
+    paymentFee?: Prisma.Decimal;
   } = {},
 ): Promise<boolean> {
   const fromStatus = opts.fromStatus ?? "PENDING";
   const data: Prisma.OrderUpdateInput = { status: "PAID", paidAt: new Date() };
   if (opts.amountPaid !== undefined) {
     data.amountPaid = opts.amountPaid;
+  }
+  if (opts.paymentFee !== undefined) {
+    data.paymentFee = opts.paymentFee;
   }
   const updated = await tx.order.updateMany({
     where: { id: orderId, storeId, status: fromStatus },
@@ -322,8 +340,11 @@ export async function applyChargeSuccessEffects(
   tx: Prisma.TransactionClient,
   orderId: string,
   storeId: string,
+  paymentFee: Prisma.Decimal | null = null,
 ): Promise<boolean> {
-  const paid = await markOrderPaidAndDecrementStock(tx, orderId, storeId);
+  const paid = await markOrderPaidAndDecrementStock(tx, orderId, storeId, {
+    ...(paymentFee !== null ? { paymentFee } : {}),
+  });
   if (!paid) {
     return false;
   }
@@ -339,8 +360,11 @@ export async function applyChargeSuccessEffects(
       "Order has no branch — cannot attribute its stock movement",
     );
   }
+  if (order !== null && paymentFee !== null && paymentFee.greaterThan(order.total)) {
+    throw new AppError(500, "PAYMENT_FEE_INVALID", "Provider fee exceeds the transaction amount");
+  }
   await creditWallet(tx, storeId, {
-    amount: order!.total,
+    amount: order!.total.sub(paymentFee ?? new Prisma.Decimal(0)),
     orderId,
     source: "ORDER_PAYMENT",
   });
@@ -419,7 +443,11 @@ async function handleTransferSuccess(
       const created = await tx.webhookEvent.create({ data: { ...event, status: "PENDING" } });
       await tx.payout.updateMany({
         where: { id: payoutId, status: { in: ["REQUESTED", "PROCESSING"] } },
-        data: { status: "SUCCESS", processedAt: new Date() },
+        data: {
+          status: "SUCCESS",
+          processedAt: new Date(),
+          ...(feeFromEvent(event, "fee") !== null ? { fee: feeFromEvent(event, "fee")! } : {}),
+        },
       });
       await tx.webhookEvent.update({
         where: { id: created.id },

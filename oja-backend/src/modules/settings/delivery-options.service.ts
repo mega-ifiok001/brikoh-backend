@@ -26,6 +26,7 @@ export interface DeliveryOptionView {
   id: string;
   name: string;
   kind: $Enums.DeliveryKind;
+  provider: $Enums.DeliveryProvider;
   description: string | null;
   baseFee: string;
   isActive: boolean;
@@ -45,6 +46,7 @@ type OptionRow = {
   id: string;
   name: string;
   kind: $Enums.DeliveryKind;
+  provider: $Enums.DeliveryProvider;
   description: string | null;
   baseFee: { toFixed: (n: number) => string };
   isActive: boolean;
@@ -61,6 +63,7 @@ function toView(row: OptionRow): DeliveryOptionView {
     id: row.id,
     name: row.name,
     kind: row.kind,
+    provider: row.provider,
     description: row.description,
     baseFee: row.baseFee.toFixed(2),
     isActive: row.isActive,
@@ -103,6 +106,9 @@ export async function createDeliveryOption(
   staffMemberId?: string,
 ): Promise<DeliveryOptionView> {
   const data = validateOrThrow(deliveryOptionCreateSchema, input) as DeliveryOptionCreateInput;
+  if (data.provider === "SHIPBUBBLE" && data.kind !== "DELIVERY") {
+    throw new AppError(400, "VALIDATION_ERROR", "Shipbubble can only be used for DELIVERY options");
+  }
   const prisma = getPrismaClient();
 
   const clash = await prisma.deliveryOption.findFirst({
@@ -124,8 +130,9 @@ export async function createDeliveryOption(
         storeId,
         name: data.name,
         kind: data.kind,
+        provider: data.provider ?? "MANUAL",
         description: data.description ?? null,
-        baseFee: data.baseFee ?? "0.00",
+        baseFee: data.provider === "SHIPBUBBLE" ? "0.00" : (data.baseFee ?? "0.00"),
         isActive: data.isActive ?? true,
         sortOrder: data.sortOrder ?? 0,
         pickupLocationId: data.pickupLocationId ?? null,
@@ -156,10 +163,15 @@ export async function updateDeliveryOption(
 
   const existing = await prisma.deliveryOption.findFirst({
     where: { id: optionId, storeId },
-    select: { id: true },
+    select: { id: true, kind: true, provider: true },
   });
   if (existing === null) {
     throw new AppError(404, "NOT_FOUND", "Delivery option not found");
+  }
+  const nextKind = data.kind ?? existing.kind;
+  const nextProvider = data.provider ?? existing.provider;
+  if (nextProvider === "SHIPBUBBLE" && nextKind !== "DELIVERY") {
+    throw new AppError(400, "VALIDATION_ERROR", "Shipbubble can only be used for DELIVERY options");
   }
   if (data.name !== undefined) {
     const clash = await prisma.deliveryOption.findFirst({
@@ -182,8 +194,11 @@ export async function updateDeliveryOption(
       data: {
         ...(data.name !== undefined ? { name: data.name } : {}),
         ...(data.kind !== undefined ? { kind: data.kind } : {}),
+        ...(data.provider !== undefined ? { provider: data.provider } : {}),
         ...(data.description !== undefined ? { description: data.description } : {}),
-        ...(data.baseFee !== undefined ? { baseFee: data.baseFee } : {}),
+        ...(data.baseFee !== undefined || data.provider === "SHIPBUBBLE"
+          ? { baseFee: nextProvider === "SHIPBUBBLE" ? "0.00" : data.baseFee }
+          : {}),
         ...(data.isActive !== undefined ? { isActive: data.isActive } : {}),
         ...(data.sortOrder !== undefined ? { sortOrder: data.sortOrder } : {}),
         ...(data.pickupLocationId !== undefined

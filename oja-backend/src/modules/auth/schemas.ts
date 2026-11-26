@@ -85,6 +85,9 @@ export const loginSchema = z.object({
 });
 export type LoginInput = z.infer<typeof loginSchema>;
 
+export const pinLoginSchema = z.object({ email: emailSchema, pin: z.string().regex(/^\d{6}$/, "PIN must be exactly 6 digits") });
+export const setPinSchema = z.object({ pin: z.string().regex(/^\d{6}$/, "PIN must be exactly 6 digits"), currentPassword: z.string().optional() });
+
 export const refreshTokenSchema = z.string().min(1, "Refresh token is required");
 export type RefreshTokenInput = z.infer<typeof refreshTokenSchema>;
 

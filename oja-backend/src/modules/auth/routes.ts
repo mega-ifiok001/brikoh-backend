@@ -6,6 +6,9 @@ import {
   forgotPasswordHandler,
   googleSignInHandler,
   loginHandler,
+  pinLoginHandler,
+  pinStatusHandler,
+  setPinHandler,
   logoutHandler,
   meHandler,
   onboardingHandler,
@@ -21,8 +24,11 @@ const authRouter: Router = Router();
 
 authRouter.post("/register", rateLimit({ windowMs: 60_000, max: 10 }), registerHandler);
 authRouter.post("/login", loginHandler);
+authRouter.post("/pin-login", rateLimit({ windowMs: 60_000, max: 10 }), pinLoginHandler);
 authRouter.post("/google", googleSignInHandler);
-authRouter.post("/refresh", refreshHandler);
+// A mobile client normally refreshes only once per access-token lifetime.
+// Keep retries bounded so a broken client cannot hammer token verification.
+authRouter.post("/refresh", rateLimit({ windowMs: 60_000, max: 10 }), refreshHandler);
 authRouter.post("/logout", logoutHandler);
 // Email/code pairs are the credential; the short-lived OTP is purpose-bound
 // to the email and account, and verified once.
@@ -48,6 +54,10 @@ dashboardMeRouter.get("/", meHandler);
 const dashboardPasswordRouter: Router = Router();
 dashboardPasswordRouter.post("/", changePasswordHandler);
 
+const dashboardPinRouter: Router = Router();
+dashboardPinRouter.get("/", pinStatusHandler);
+dashboardPinRouter.put("/", rateLimit({ windowMs: 60_000, max: 10 }), setPinHandler);
+
 const dashboardAccountRouter: Router = Router();
 dashboardAccountRouter.delete("/", deleteAccountHandler);
 
@@ -68,6 +78,7 @@ export {
   dashboardAccountRouter,
   dashboardMeRouter,
   dashboardPasswordRouter,
+  dashboardPinRouter,
   onboardingRouter,
   resendVerificationRouter,
 };

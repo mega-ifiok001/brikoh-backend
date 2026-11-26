@@ -18,33 +18,25 @@ not). Anyone with `analytics.manage` but without `viewProfit` gets
 `403 INSUFFICIENT_PERMISSIONS` on every report endpoint, including the
 CSV exports.
 
-## Date range
+## Date filter
 
-Every range-based endpoint takes two query params:
+Range-based report endpoints accept one calendar date: `?date=2026-08-17`.
+Dates must be real calendar days in `YYYY-MM-DD` format. The backend filters
+the full UTC day, from midnight on the selected date up to (but not including)
+midnight the next day. This works for timestamped orders and the expense
+`DATE` column, independent of the server's local timezone. Range parameters
+such as `start`, `end`, `startDate`, and `endDate` are no longer accepted.
 
-- `start` — required, UTC ISO-8601 with an explicit offset (`Z` or `+00:00`).
-- `end` — required, same format. Must be **after** `start`.
-
-The range is half-open `[start, end)`: orders/expenses are counted when
-their timestamp is `>= start` and `< end`. Both are required — omitting
-either is a `400 INVALID_RANGE`; there is no default range.
-
-The frontend is free to offer "This week / This month / …" buttons, but it
-does so by computing the `start`/`end` dates client-side — the API exposes
-only the explicit range.
-
-The response echoes the resolved `range` with its exact UTC `start`/`end`
-so the client can label the report without recomputing boundaries.
+Responses echo the selected `date` as `YYYY-MM-DD`.
 
 **Range errors** are `400 INVALID_RANGE` with a clear, human-readable
 message:
 
-| Cause | Message |
-| ----- | ------- |
-| `start` or `end` missing | "Please provide both a start and end date." |
-| not a valid date-time | "Enter a valid date and time." |
-| missing UTC offset | "Dates must be in UTC (include a 'Z' or '+00:00' offset)." |
-| `start >= end` | "The start date must be before the end date." |
+| Cause                                 | Message                                                               |
+| ------------------------------------- | --------------------------------------------------------------------- |
+| `date` missing                        | "Please provide a date in YYYY-MM-DD format."                         |
+| Malformed or impossible calendar date | "Enter a date in YYYY-MM-DD format." / "Enter a valid calendar date." |
+| Range parameter supplied              | "Only the date query parameter is supported."                         |
 
 ## GET /api/dashboard/reports/pnl
 
@@ -54,10 +46,7 @@ Status: `200`
 
 ```json
 {
-  "range": {
-    "start": "2026-08-17T00:00:00.000Z",
-    "end": "2026-08-24T00:00:00.000Z"
-  },
+  "date": "2026-08-17",
   "revenue": "1250000.00",
   "cogs": "680000.00",
   "expenses": "125000.00",
@@ -69,19 +58,19 @@ Status: `200`
 Definitions (all money as `toFixed(2)` strings):
 
 - `revenue` — sum of `order.total` for orders in `PAID` or `SHIPPED`
-  status created inside the range (the same sale definition the
+  status created on the selected date (the same sale definition the
   analytics module uses).
 - `cogs` — cost of goods sold: sum over those orders' line items of
   `product.costPrice × quantity`. A product with no recorded
   `costPrice` contributes **0** — this is a deliberate, surfaced
   tradeoff.
-- `expenses` — sum of `amount` on expenses whose `date` falls inside the
-  range.
+- `expenses` — sum of `amount` on expenses whose `date` matches the
+  selected date.
 - `netProfit` — `revenue − cogs − expenses`.
 - `cogsUnpricedLineItems` — the number of sold line items whose product
   has no `costPrice`. When nonzero, profit is **overstated** by the
   unpriced cost. The UI must show this prominently (banner, not a
-  footnote): "N items sold in this range have no recorded cost price;
+  footnote): "N items sold on this date have no recorded cost price;
   profit may be overstated."
 
 ## GET /api/dashboard/reports/expenses-by-category
@@ -92,10 +81,7 @@ Status: `200`
 
 ```json
 {
-  "range": {
-    "start": "2026-08-01T00:00:00.000Z",
-    "end": "2026-09-01T00:00:00.000Z"
-  },
+  "date": "2026-08-17",
   "categories": [
     { "category": "RENT", "count": 1, "total": "450000.00" },
     { "category": "PACKAGING", "count": 4, "total": "12500.00" }
@@ -104,7 +90,7 @@ Status: `200`
 }
 ```
 
-Categories with no expenses in the range are omitted. `categories` is
+Categories with no expenses on the selected date are omitted. `categories` is
 ordered by `total` descending.
 
 ## CSV exports
@@ -114,8 +100,8 @@ ordered by `total` descending.
 Same query params as the JSON endpoint. One header row plus one data row:
 
 ```
-start,end,revenue,cogs,expenses,netProfit,cogsUnpricedLineItems
-2026-08-17T00:00:00.000Z,2026-08-24T00:00:00.000Z,1250000.00,680000.00,125000.00,445000.00,2
+date,revenue,cogs,expenses,netProfit,cogsUnpricedLineItems
+2026-08-17,1250000.00,680000.00,125000.00,445000.00,2
 ```
 
 ### GET /api/dashboard/reports/expenses-by-category/export.csv
@@ -140,8 +126,8 @@ Status: `200`
 Headers:
 
 - `Content-Type: text/csv`
-- `Content-Disposition: attachment; filename="pnl-2026-08-17_2026-08-24.csv"`
-  (server-generated from the range's UTC dates)
+- `Content-Disposition: attachment; filename="pnl-2026-08-17_2026-08-17.csv"`
+  (for `date=2026-08-17`; server-generated from the selected UTC date)
 
 Body: the CSV text.
 
@@ -201,10 +187,10 @@ MUG-001,Ceramic Mug,12,450.00,1500.00,5400.00,18000.00
 
 ## Error responses
 
-| Status | Code | Condition |
-| ------ | ---- | --------- |
-| `400`  | `INVALID_RANGE` | Missing, malformed, non-UTC, or reversed (`start >= end`) date range |
-| `401`  | `UNAUTHORIZED` | Missing/invalid bearer token |
+| Status | Code                       | Condition                                                 |
+| ------ | -------------------------- | --------------------------------------------------------- |
+| `400`  | `INVALID_RANGE`            | Missing or invalid date, or unsupported range parameters  |
+| `401`  | `UNAUTHORIZED`             | Missing/invalid bearer token                              |
 | `403`  | `INSUFFICIENT_PERMISSIONS` | Staff without `analytics.manage`, or without `viewProfit` |
 
 Note: there is no `404` — reports always aggregate over whatever data

@@ -10,6 +10,8 @@ import {
   rejectBankTransferPayment,
 } from "./service.js";
 import { recordPosSale } from "./pos.service.js";
+import { getFulfillment, updateFulfillment } from "./fulfillment.service.js";
+import { bookShipbubbleShipment, cancelShipbubbleShipment, createShipbubbleRates } from "./shipbubble.service.js";
 import { confirmBankTransferSchema, listOrdersParamsSchema, validateOrThrow } from "./schemas.js";
 
 /** POST /api/public/checkout/:subdomain */
@@ -26,6 +28,21 @@ export async function checkoutHandler(
     res
       .status(200)
       .json(await initiateCheckout(store.storeId, req.body, undefined, store.currency));
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** POST /api/public/checkout/:subdomain/shipping-rates */
+export async function shipbubbleRatesHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const store = req.publicStore;
+    if (store === undefined) throw new AppError(404, "STORE_NOT_FOUND", "No store exists at that subdomain");
+    res.status(200).json(await createShipbubbleRates(store.storeId, req.body));
   } catch (err) {
     next(err);
   }
@@ -81,6 +98,74 @@ export async function getOrderHandler(
   }
   try {
     res.status(200).json(await getOrderDetail(tenant.storeId, String(req.params.orderId)));
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** GET /api/dashboard/orders/:orderId/fulfillment */
+export async function getFulfillmentHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const tenant = req.tenant;
+    if (tenant === undefined) throw new AppError(401, "UNAUTHORIZED", "Authentication required");
+    res.status(200).json(await getFulfillment(tenant.storeId, String(req.params.orderId)));
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** PATCH /api/dashboard/orders/:orderId/fulfillment */
+export async function updateFulfillmentHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const tenant = req.tenant;
+    if (tenant === undefined) throw new AppError(401, "UNAUTHORIZED", "Authentication required");
+    res.status(200).json(
+      await updateFulfillment(
+        tenant.storeId,
+        String(req.params.orderId),
+        tenant.staffMemberId,
+        req.body,
+        req.header("Idempotency-Key"),
+      ),
+    );
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** POST /api/dashboard/orders/:orderId/shipbubble/book */
+export async function bookShipbubbleShipmentHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const tenant = req.tenant;
+    if (tenant === undefined) throw new AppError(401, "UNAUTHORIZED", "Authentication required");
+    res.status(200).json(await bookShipbubbleShipment(tenant.storeId, String(req.params.orderId)));
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** POST /api/dashboard/orders/:orderId/shipbubble/cancel */
+export async function cancelShipbubbleShipmentHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const tenant = req.tenant;
+    if (tenant === undefined) throw new AppError(401, "UNAUTHORIZED", "Authentication required");
+    res.status(200).json(await cancelShipbubbleShipment(tenant.storeId, String(req.params.orderId)));
   } catch (err) {
     next(err);
   }

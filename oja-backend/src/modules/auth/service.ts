@@ -21,6 +21,8 @@ import {
   forgotPasswordSchema,
   googleSignInSchema,
   loginSchema,
+  pinLoginSchema,
+  setPinSchema,
   onboardingSchema,
   refreshTokenSchema,
   registerSchema,
@@ -909,6 +911,74 @@ export async function login(input: unknown): Promise<AuthResult> {
     refreshToken,
     user: userInfo(account),
   };
+}
+
+const PIN_MAX_ATTEMPTS = 5;
+const PIN_LOCK_MS = 15 * 60_000;
+
+/** PIN sign-in is intended for a user's own mobile device; password remains the recovery credential. */
+export async function loginWithPin(input: unknown): Promise<AuthResult> {
+  const data = validateOrThrow(pinLoginSchema, input);
+  const prisma = getPrismaClient();
+  const account = await prisma.account.findUnique({
+    where: { email: data.email },
+    include: { owner: { include: { store: true } }, staffMembers: { include: { store: true } }, pinCredential: true },
+  });
+  const credential = account?.pinCredential;
+  const invalid = () => new AppError(401, "INVALID_CREDENTIALS", "Email or PIN is incorrect — please try again");
+  if (!account || !credential) throw invalid();
+  const now = new Date();
+  if (credential.lockedUntil && credential.lockedUntil > now) {
+    throw new AppError(429, "PIN_TEMPORARILY_LOCKED", "PIN sign-in is temporarily locked. Use your account password or try again later.");
+  }
+  if (!(await bcrypt.compare(data.pin, credential.pinHash))) {
+    const locked = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "accountId" FROM "AccountPinCredential" WHERE "accountId" = ${account.id}::uuid FOR UPDATE`;
+      const latest = await tx.accountPinCredential.findUnique({ where: { accountId: account.id } });
+      if (!latest || (latest.lockedUntil && latest.lockedUntil > new Date())) return true;
+      const attempts = latest.failedAttempts + 1;
+      if (attempts >= PIN_MAX_ATTEMPTS) {
+        await tx.accountPinCredential.update({ where: { accountId: account.id }, data: { failedAttempts: 0, lockedUntil: new Date(Date.now() + PIN_LOCK_MS) } });
+        return true;
+      }
+      await tx.accountPinCredential.update({ where: { accountId: account.id }, data: { failedAttempts: attempts } });
+      return false;
+    });
+    if (locked) throw new AppError(429, "PIN_TEMPORARILY_LOCKED", "Too many incorrect PIN attempts. Use your account password or try again in 15 minutes.");
+    throw invalid();
+  }
+  const membership = resolveMembership(account);
+  if (membership && !membership.isActive) throw new AppError(403, "ACCOUNT_DISABLED", "This account has been deactivated — contact your store owner");
+  const stillUnlocked = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "accountId" FROM "AccountPinCredential" WHERE "accountId" = ${account.id}::uuid FOR UPDATE`;
+    const latest = await tx.accountPinCredential.findUnique({ where: { accountId: account.id } });
+    if (!latest || (latest.lockedUntil && latest.lockedUntil > new Date())) return false;
+    await tx.accountPinCredential.update({ where: { accountId: account.id }, data: { failedAttempts: 0, lockedUntil: null } });
+    return true;
+  });
+  if (!stillUnlocked) throw new AppError(429, "PIN_TEMPORARILY_LOCKED", "PIN sign-in is temporarily locked. Use your account password or try again later.");
+  const refreshToken = await issueRefreshToken(account.id);
+  const accessToken = signAccessToken({ sub: account.id, storeId: membership?.storeId, role: membership?.role ?? "", staffMemberId: membership?.staffMemberId });
+  return { accessToken, refreshToken, user: userInfo(account) };
+}
+
+/** Initial setup requires a fresh authenticated session; replacing a PIN requires the account password. */
+export async function setAccountPin(accountId: string, input: unknown): Promise<void> {
+  const data = validateOrThrow(setPinSchema, input);
+  const prisma = getPrismaClient();
+  const account = await prisma.account.findUnique({ where: { id: accountId }, include: { pinCredential: true } });
+  if (!account) throw new AppError(404, "ACCOUNT_NOT_FOUND", "Account not found");
+  if (account.pinCredential) {
+    const valid = account.passwordHash && data.currentPassword && await bcrypt.compare(data.currentPassword, account.passwordHash);
+    if (!valid) throw new AppError(401, "INVALID_CREDENTIALS", "Enter your account password to change your PIN");
+  }
+  const pinHash = await bcrypt.hash(data.pin, BCRYPT_COST);
+  await prisma.accountPinCredential.upsert({ where: { accountId }, create: { accountId, pinHash }, update: { pinHash, failedAttempts: 0, lockedUntil: null } });
+}
+
+export async function getAccountPinStatus(accountId: string): Promise<{ configured: boolean }> {
+  const credential = await getPrismaClient().accountPinCredential.findUnique({ where: { accountId }, select: { id: true } });
+  return { configured: credential !== null };
 }
 
 /**

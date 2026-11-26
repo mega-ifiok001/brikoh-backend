@@ -30,7 +30,10 @@ const expenseAmountSchema = z
 const expenseDateSchema = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "date must be a YYYY-MM-DD string")
-  .refine((value) => !Number.isNaN(Date.parse(`${value}T00:00:00.000Z`)), "invalid calendar date");
+  .refine((value) => {
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+  }, "invalid calendar date");
 
 export const EXPENSE_CATEGORIES = [
   "RENT",
@@ -62,16 +65,11 @@ export const expenseUpdateSchema = expenseCreateSchema
 export const listExpensesParamsSchema = z
   .object({
     category: z.enum(EXPENSE_CATEGORIES).optional(),
-    from: expenseDateSchema.optional(),
-    to: expenseDateSchema.optional(),
+    date: expenseDateSchema.optional(),
     limit: z.coerce.number().int().min(1).max(100).default(50),
     cursor: z.string().min(1).max(64).optional(),
   })
-  .strict()
-  .refine((data) => data.from === undefined || data.to === undefined || data.from <= data.to, {
-    message: "from must be on or before to",
-    path: ["to"],
-  });
+  .strict();
 
 export type ExpenseCreateInput = z.infer<typeof expenseCreateSchema>;
 export type ExpenseUpdateInput = z.infer<typeof expenseUpdateSchema>;
