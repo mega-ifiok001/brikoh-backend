@@ -1,0 +1,680 @@
+openapi: 3.1.0
+info:
+  title: Brikoh Payments API
+  version: 1.0.0
+  description: |
+    Payment and money movement APIs for storefront checkout, POS, manual bank transfers,
+    merchant payouts, invoices, customer credit repayments, and Brikoh subscription billing.
+    Examples use fake IDs and test credentials. Storefront/public endpoints do not require
+    authentication. Dashboard endpoints require a merchant bearer token and tenant permissions.
+servers:
+  - url: /
+    description: Same origin as the Brikoh API
+security: []
+tags:
+  - name: Provider settings
+  - name: Storefront and POS checkout
+  - name: Bank transfers
+  - name: Merchant wallet
+  - name: Invoices and credit
+  - name: Subscription billing
+  - name: Paystack webhooks
+paths:
+  /api/dashboard/payments/provider:
+    get:
+      tags: [Provider settings]
+      summary: Read this store's Paystack settings
+      description: Owner-only. The secret key is never returned in full.
+      operationId: getPaymentProvider
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200':
+          description: Configured state and masked key
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProviderView' }
+              example: { configured: true, provider: paystack, publicKey: pk_test_1234abcd, secretKeyMasked: 'sk_t••••••••efgh', updatedAt: '2026-11-23T10:00:00.000Z' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [Provider settings]
+      summary: Save or replace this store's Paystack keys
+      description: Owner-only. Public/secret keys must both be test or both be live. Secret key is encrypted at rest.
+      operationId: setPaymentProvider
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProviderInput' }
+            example: { provider: paystack, publicKey: pk_test_1234abcd, secretKey: sk_test_1234abcd5678efgh }
+      responses:
+        '200':
+          description: Saved settings with the secret masked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProviderView' }
+              example: { configured: true, provider: paystack, publicKey: pk_test_1234abcd, secretKeyMasked: 'sk_t••••••••efgh', updatedAt: '2026-11-23T10:00:00.000Z' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/dashboard/payments/settlements:
+    get:
+      tags: [Provider settings]
+      summary: Get Paystack transaction and settlement status for paid orders
+      description: Owner-only. Calls Paystack with this store's credentials. Paystack does not expose per-transaction settlement batches, so settlement.status is normally UNAVAILABLE with an explanation.
+      operationId: getOrderSettlements
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200':
+          description: Paid order status projections
+          content:
+            application/json:
+              schema: { type: object, required: [settlements], properties: { settlements: { type: array, items: { $ref: '#/components/schemas/Settlement' } } } }
+              example:
+                settlements:
+                  - orderId: 77e0c7d0-c22f-4d80-8d5a-a922a254f5f4
+                    reference: ord_8cfab7d16f064910a663ab59
+                    total: '1998.00'
+                    currency: NGN
+                    transactionStatus: success
+                    paidAt: '2026-11-23T10:10:00.000Z'
+                    settlement: { status: UNAVAILABLE, settledAt: null, detail: 'Paystack does not expose per-transaction settlement data; batch settlement is tracked separately' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/public/checkout/{subdomain}:
+    post:
+      tags: [Storefront and POS checkout]
+      summary: Create a storefront order and initialize payment
+      description: Public. Product prices, discount, delivery fee, currency and total are calculated server-side. paymentMethod defaults to Paystack; bank_transfer returns the store's default account and a payment reference without contacting Paystack.
+      operationId: createStorefrontCheckout
+      parameters:
+        - { name: subdomain, in: path, required: true, schema: { type: string, example: ada-market } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CheckoutRequest' }
+            example:
+              customer: { name: Ade Buyer, email: buyer@example.com, phone: '+2348012345678' }
+              items: [{ productId: 4b52e9be-daa9-47ec-8c9e-0836211712cc, quantity: 2 }]
+              paymentMethod: paystack
+              origin: SOCIAL
+      responses:
+        '200':
+          description: Order and payment instructions
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckoutResponse' }
+              example:
+                order: { id: 77e0c7d0-c22f-4d80-8d5a-a922a254f5f4, orderNumber: BRI-2026-000123, total: '1998.00', discountAmount: '0.00', discountId: null, status: PENDING }
+                payment: { provider: paystack, reference: ord_8cfab7d16f064910a663ab59, redirectUrl: 'https://checkout.paystack.com/example' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '502': { $ref: '#/components/responses/ProviderError' }
+  /api/dashboard/orders:
+    post:
+      tags: [Storefront and POS checkout]
+      summary: Record a POS sale
+      description: Requires orders.manage. CASH, TRANSFER and CREDIT sales are recorded immediately. CARD creates a pending Paystack checkout and becomes paid only after a verified webhook. Prices come from catalog data.
+      operationId: recordPosSale
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PosSaleRequest' }
+            example:
+              items: [{ productId: 4b52e9be-daa9-47ec-8c9e-0836211712cc, quantity: 2 }]
+              paymentMethod: CARD
+              customerId: 6ba8df9c-ec82-4534-8b6f-7365bc5603d1
+              email: buyer@example.com
+      responses:
+        '201': { description: Sale recorded or card checkout initialized, content: { application/json: { schema: { type: object, additionalProperties: true }, example: { order: { id: 77e0c7d0-c22f-4d80-8d5a-a922a254f5f4, orderNumber: BRI-2026-000123, status: PENDING, total: '1998.00', paymentMethod: CARD }, payment: { provider: paystack, reference: ord_8cfab7d16f064910a663ab59, redirectUrl: 'https://checkout.paystack.com/example' } } } } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/public/orders/{orderId}:
+    get:
+      tags: [Bank transfers]
+      summary: Get public order status and transfer details
+      description: The order UUID is the lookup credential. Bank details are included for bank-transfer orders.
+      operationId: getPublicPaymentOrder
+      parameters:
+        - { name: orderId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Public order payment projection, content: { application/json: { schema: { $ref: '#/components/schemas/PublicOrderPayment' }, example: { id: 77e0c7d0-c22f-4d80-8d5a-a922a254f5f4, status: PENDING, paymentProvider: bank_transfer, paymentReference: ord_8cfab7d16f064910a663ab59, bankDetails: { bankName: Example Bank, accountName: Ada Market, accountNumber: '0123456789', reference: ord_8cfab7d16f064910a663ab59 }, delivery: null } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Bank transfers]
+      summary: Customer reports that a bank transfer was sent
+      description: This moves a bank-transfer order to AWAITING_PAYMENT only. It does not confirm receipt or mark the order PAID.
+      operationId: markBankTransferPaid
+      parameters:
+        - { name: orderId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Payment claim recorded, content: { application/json: { schema: { $ref: '#/components/schemas/PublicOrderPayment' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/dashboard/orders/{orderId}/confirm-payment:
+    post:
+      tags: [Bank transfers]
+      summary: Confirm a reported bank transfer
+      description: Requires orders.manage. confirmedAmount must equal the stored order total. The paid transition and stock decrement are atomic.
+      operationId: confirmBankTransfer
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: orderId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, required: [confirmedAmount], properties: { confirmedAmount: { oneOf: [{ type: number, exclusiveMinimum: 0 }, { type: string, pattern: '^\d+(\.\d{1,2})?$' }], example: '1998.00' } } }
+            example: { confirmedAmount: '1998.00' }
+      responses:
+        '200': { description: Updated order detail, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/dashboard/orders/{orderId}/reject-payment:
+    post:
+      tags: [Bank transfers]
+      summary: Reject a reported bank transfer
+      description: Requires orders.manage. Reverts AWAITING_PAYMENT to PENDING for another customer claim.
+      operationId: rejectBankTransfer
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: orderId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Updated order detail, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/dashboard/wallet:
+    get:
+      tags: [Merchant wallet]
+      summary: Get wallet balance and recent ledger entries
+      description: Owner-only. Wallet currency is NGN.
+      operationId: getWalletOverview
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200': { description: Current balances and up to 25 recent movements, content: { application/json: { schema: { $ref: '#/components/schemas/WalletOverview' }, example: { wallet: { currency: NGN, available: '25000.00', pending: '5000.00', withdrawn: '12000.00', totalCredits: '42000.00' }, recentEntries: [{ id: 4ae8aede-72e3-4134-8220-38a38db32be0, type: CREDIT, source: ORDER_PAYMENT, amount: '1998.00', balanceAfter: '25000.00', orderId: 77e0c7d0-c22f-4d80-8d5a-a922a254f5f4, payoutId: null, createdAt: '2026-11-23T10:00:00.000Z' }] } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/dashboard/wallet/bank-accounts:
+    get:
+      tags: [Merchant wallet]
+      summary: List payout bank accounts
+      operationId: listPayoutBankAccounts
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200': { description: Accounts expose masked account numbers only, content: { application/json: { schema: { type: object, required: [bankAccounts], properties: { bankAccounts: { type: array, items: { $ref: '#/components/schemas/BankAccount' } } } }, example: { bankAccounts: [{ id: 11519f95-0384-49d5-984f-251c2f6f6ec3, accountName: Ada Market, bankName: Example Bank, bankCode: '058', maskedAccountNumber: '0123••••6789', isDefault: true, createdAt: '2026-11-23T10:00:00.000Z' }] } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Merchant wallet]
+      summary: Add a payout bank account
+      description: Paystack resolves the bank account holder. The API stores the masked number and transfer-recipient code, not the full account number.
+      operationId: createPayoutBankAccount
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateBankAccountRequest' }
+            example: { accountNumber: '0123456789', bankName: Example Bank, bankCode: '058', isDefault: true }
+      responses:
+        '201': { description: Created account, content: { application/json: { schema: { type: object, required: [bankAccount], properties: { bankAccount: { $ref: '#/components/schemas/BankAccount' } } } } } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '502': { $ref: '#/components/responses/ProviderError' }
+  /api/dashboard/wallet/bank-accounts/{bankAccountId}:
+    delete:
+      tags: [Merchant wallet]
+      summary: Delete a payout bank account
+      description: Bank accounts with payout history cannot be deleted.
+      operationId: deletePayoutBankAccount
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: bankAccountId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Deleted; no response body }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/dashboard/wallet/withdrawals:
+    get:
+      tags: [Merchant wallet]
+      summary: List wallet withdrawals
+      operationId: listWalletWithdrawals
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: cursor, in: query, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200': { description: Cursor-paginated payout list, content: { application/json: { schema: { type: object, required: [withdrawals, nextCursor], properties: { withdrawals: { type: array, items: { $ref: '#/components/schemas/Payout' } }, nextCursor: { type: [string, 'null'], format: uuid } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Merchant wallet]
+      summary: Withdraw wallet funds to a saved bank account
+      description: Minimum NGN 100. Wallet debit and payout creation are atomic. On provider rejection, the payout is FAILED and the debit is reversed; transfer webhooks finalize asynchronous outcomes.
+      operationId: createWalletWithdrawal
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, required: [bankAccountId, amount], properties: { bankAccountId: { type: string, format: uuid }, amount: { type: string, pattern: '^\d+(\.\d{1,2})?$' } } }
+            example: { bankAccountId: 11519f95-0384-49d5-984f-251c2f6f6ec3, amount: '5000.00' }
+      responses:
+        '201': { description: Created payout (may already be FAILED if the provider rejected the transfer), content: { application/json: { schema: { $ref: '#/components/schemas/Payout' }, example: { id: 1f7de108-498c-45aa-b7e0-b8d9822f6ab5, reference: wd_0d8c6f2373a145e0bb552596aaff8123, amount: '5000.00', status: PROCESSING, createdAt: '2026-11-23T10:00:00.000Z', processedAt: null, bankAccount: { id: 11519f95-0384-49d5-984f-251c2f6f6ec3, maskedAccountNumber: '0123••••6789', bankName: Example Bank, accountName: Ada Market } } } } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '502': { $ref: '#/components/responses/ProviderError' }
+  /api/webhooks/paystack:
+    post:
+      tags: [Paystack webhooks]
+      summary: Receive merchant Paystack charge and transfer events
+      description: |
+        Provider callback. Send the exact raw JSON body and x-paystack-signature HMAC-SHA512.
+        The API resolves the store from the order or payout reference and validates the signature
+        using that store's secret. charge.success atomically marks the order PAID, decrements stock
+        and credits the wallet. charge.failed marks the order failed. transfer.success completes
+        a payout; transfer.failed reverses its debit. Event IDs are deduplicated.
+      operationId: paystackWebhook
+      parameters:
+        - { name: x-paystack-signature, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaystackWebhook' }
+            example: { event: charge.success, data: { id: 'evt_123456', reference: ord_8cfab7d16f064910a663ab59, status: success } }
+      responses:
+        '200': { description: Accepted, including duplicate and unsupported events, content: { application/json: { schema: { type: object, required: [accepted], properties: { accepted: { type: boolean, const: true } } }, example: { accepted: true } } } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { description: Invalid signature, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/dashboard/invoices/{invoiceId}/payments:
+    post:
+      tags: [Invoices and credit]
+      summary: Record a payment against an issued invoice
+      description: Requires invoices.manage. Supports partial payment and updates the payment ledger/invoice balance atomically. Records externally received money; does not charge a card.
+      operationId: recordInvoicePayment
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: invoiceId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, required: [amount], properties: { amount: { oneOf: [{ type: number, exclusiveMinimum: 0 }, { type: string, pattern: '^\d+(\.\d{1,2})?$' }] }, note: { type: string, maxLength: 500 } } }
+            example: { amount: '2500.00', note: Bank transfer received }
+      responses:
+        '200': { description: Allocation result, content: { application/json: { schema: { type: object, additionalProperties: true }, example: { invoiceId: 2c86a079-4356-4d88-8fb4-c1b3971f1a9e, status: ISSUED, allocated: '2500.00', balanceDue: '1500.00', totalOutstanding: '4000.00' } } } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/public/invoices/{invoiceId}:
+    get:
+      tags: [Invoices and credit]
+      summary: Read a shared invoice and its payment instructions
+      description: Public. While payable, the response may include the store's default bank account. Paid, void, draft, disabled, or unknown invoices do not expose payment instructions.
+      operationId: getPublicInvoice
+      parameters:
+        - { name: invoiceId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Public invoice, content: { application/json: { schema: { type: object, additionalProperties: true }, example: { id: 2c86a079-4356-4d88-8fb4-c1b3971f1a9e, number: INV-2026-0004, status: ISSUED, storeName: Ada Market, currency: NGN, customerName: Ade Buyer, total: '4000.00', amountPaid: '0.00', balanceDue: '4000.00', isPayable: true, bankDetails: { bankName: Example Bank, accountName: Ada Market, accountNumber: '0123456789' }, lineItems: [] } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/dashboard/invoices/{invoiceId}/enable-link:
+    post:
+      tags: [Invoices and credit]
+      summary: Enable a customer-facing invoice payment link
+      description: Requires invoices.manage. Enables the public invoice view/link for an invoice that has been issued.
+      operationId: enableInvoicePaymentLink
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: invoiceId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Invoice link enabled, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/dashboard/invoices/{invoiceId}/disable-link:
+    post:
+      tags: [Invoices and credit]
+      summary: Disable a customer-facing invoice payment link
+      description: Requires invoices.manage. Revokes public access without voiding or changing the invoice balance.
+      operationId: disableInvoicePaymentLink
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: invoiceId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Invoice link disabled, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/dashboard/customers/{customerId}/credits/repayments:
+    post:
+      tags: [Invoices and credit]
+      summary: Record repayment of customer credit
+      description: Requires customers.manage. Allocates against oldest outstanding credit orders first, atomically. This records money received outside Brikoh and does not initiate a provider charge.
+      operationId: recordCreditRepayment
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: customerId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, required: [amount], properties: { amount: { oneOf: [{ type: number, exclusiveMinimum: 0 }, { type: string, pattern: '^\d+(\.\d{1,2})?$' }] }, note: { type: string, maxLength: 500 } } }
+            example: { amount: '3000.00', note: Cash repayment received }
+      responses:
+        '200': { description: Repayment allocations, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/dashboard/subscriptions/checkout:
+    post:
+      tags: [Subscription billing]
+      summary: Start paid Brikoh subscription checkout
+      description: Owner-only. Uses Brikoh's platform Paystack keys and plan codes, not the merchant's own Paystack credentials.
+      operationId: subscriptionCheckout
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TierRequest' }
+            example: { tier: PRO }
+      responses:
+        '201': { description: Paystack authorization URL, content: { application/json: { schema: { type: object, required: [reference, authorizationUrl, amount, tier], properties: { reference: { type: string }, authorizationUrl: { type: string, format: uri }, amount: { type: string }, tier: { $ref: '#/components/schemas/Tier' } } }, example: { reference: sub_0123456789abcdef0123456789abcdef, authorizationUrl: 'https://checkout.paystack.com/example', amount: '15000.00', tier: PRO } } } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '502': { $ref: '#/components/responses/ProviderError' }
+  /api/dashboard/subscriptions/upgrade:
+    post:
+      tags: [Subscription billing]
+      summary: Start a prorated plan upgrade
+      description: Owner-only. Upgrade is charged as a one-off Paystack transaction. The tier changes after a verified successful platform webhook.
+      operationId: subscriptionUpgrade
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TierRequest' }
+            example: { tier: ENTERPRISE }
+      responses:
+        '201': { description: Prorated upgrade checkout, content: { application/json: { schema: { type: object, additionalProperties: true }, example: { reference: upg_0123456789abcdef0123456789abcdef, authorizationUrl: 'https://checkout.paystack.com/example', proratedAmount: '7500.00', tier: ENTERPRISE, effectiveImmediately: true } } } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/dashboard/subscriptions/payments:
+    get:
+      tags: [Subscription billing]
+      summary: List subscription billing payments
+      operationId: listSubscriptionPayments
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200': { description: Billing history, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/SubscriptionPayment' } } } }, example: { items: [{ id: 9d833e11-9d85-43d3-abef-e7167765e489, tier: PRO, kind: SUBSCRIPTION, status: SUCCESS, reference: sub_0123456789abcdef0123456789abcdef, amount: '15000.00', paidAt: '2026-11-23T10:00:00.000Z', createdAt: '2026-11-23T09:55:00.000Z', orphanReason: null }] } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/dashboard/subscriptions/payments/{paymentId}:
+    get:
+      tags: [Subscription billing]
+      summary: Get a subscription billing payment
+      operationId: getSubscriptionPayment
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: paymentId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Payment record, content: { application/json: { schema: { $ref: '#/components/schemas/SubscriptionPayment' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/webhooks/paystack-subscriptions:
+    post:
+      tags: [Paystack webhooks]
+      summary: Receive Brikoh subscription billing events
+      description: Provider callback signed with Brikoh's platform Paystack secret, separate from store-specific keys. Exact raw request bytes are used for x-paystack-signature verification.
+      operationId: paystackSubscriptionWebhook
+      parameters:
+        - { name: x-paystack-signature, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SubscriptionWebhook' }
+            example: { event: charge.success, data: { id: 'evt_98765', reference: upg_0123456789abcdef0123456789abcdef, status: success, amount: 750000 } }
+      responses:
+        '200': { description: Accepted, content: { application/json: { schema: { type: object, required: [accepted], properties: { accepted: { type: boolean, const: true } } }, example: { accepted: true } } } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { description: Invalid signature, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Merchant access token; tenant identity and permissions are checked on dashboard routes.
+  schemas:
+    ProviderInput:
+      type: object
+      additionalProperties: false
+      required: [provider, publicKey, secretKey]
+      properties:
+        provider: { type: string, enum: [paystack] }
+        publicKey: { type: string, pattern: '^pk_(test|live)_[A-Za-z0-9]+$' }
+        secretKey: { type: string, pattern: '^sk_(test|live)_[A-Za-z0-9]+$', writeOnly: true }
+    ProviderView:
+      type: object
+      required: [configured, provider, publicKey, secretKeyMasked, updatedAt]
+      properties:
+        configured: { type: boolean }
+        provider: { type: string, enum: [paystack] }
+        publicKey: { type: [string, 'null'] }
+        secretKeyMasked: { type: [string, 'null'] }
+        updatedAt: { type: [string, 'null'], format: date-time }
+    Settlement:
+      type: object
+      required: [orderId, reference, total, currency, transactionStatus, paidAt, settlement]
+      properties:
+        orderId: { type: string, format: uuid }
+        reference: { type: string }
+        total: { type: string }
+        currency: { type: string }
+        transactionStatus: { type: string, enum: [success, failed, pending, unavailable] }
+        paidAt: { type: [string, 'null'], format: date-time }
+        settlement: { type: object, required: [status, settledAt, detail], properties: { status: { type: string, enum: [SETTLED, UNAVAILABLE] }, settledAt: { type: [string, 'null'], format: date-time }, detail: { type: [string, 'null'] } } }
+    CheckoutRequest:
+      type: object
+      additionalProperties: false
+      required: [customer, items]
+      properties:
+        customer: { type: object, required: [name, email], properties: { name: { type: string, maxLength: 200 }, email: { type: string, format: email }, phone: { type: string, maxLength: 30 } } }
+        items: { type: array, minItems: 1, maxItems: 50, items: { type: object, required: [productId, quantity], properties: { productId: { type: string }, variantId: { type: string }, quantity: { type: integer, minimum: 1, maximum: 9999 } } } }
+        discountCode: { type: string, minLength: 3, maxLength: 40, pattern: '^[A-Za-z0-9-]+$' }
+        paymentMethod: { type: string, enum: [paystack, bank_transfer], default: paystack }
+        origin: { type: string, enum: [DIRECT, SOCIAL, MARKETPLACE, REFERRAL] }
+        deliveryOptionId: { type: string, format: uuid }
+        deliveryAddress: { type: string, maxLength: 500 }
+        deliveryCity: { type: string, maxLength: 120 }
+        deliveryState: { type: string, maxLength: 120 }
+        deliveryPhone: { type: string, maxLength: 30 }
+        deliveryInstructions: { type: string, maxLength: 500 }
+    CheckoutResponse:
+      type: object
+      required: [order, payment]
+      properties:
+        order: { type: object, required: [id, orderNumber, total, discountAmount, discountId, status], properties: { id: { type: string, format: uuid }, orderNumber: { type: string }, total: { type: string }, discountAmount: { type: string }, discountId: { type: [string, 'null'] }, status: { type: string, enum: [PENDING] } } }
+        payment: { type: object, required: [provider, reference, redirectUrl], properties: { provider: { type: string, enum: [paystack, bank_transfer] }, reference: { type: string }, redirectUrl: { type: string, description: Empty for bank transfer; hosted URL for Paystack. }, bankDetails: { type: object, properties: { bankName: { type: string }, accountName: { type: string }, accountNumber: { type: string }, reference: { type: string } } } } }
+    PosSaleRequest:
+      type: object
+      additionalProperties: false
+      required: [items, paymentMethod]
+      properties:
+        items: { type: array, minItems: 1, maxItems: 50, items: { type: object, required: [productId, quantity], properties: { productId: { type: string }, variantId: { type: string }, quantity: { type: integer, minimum: 1, maximum: 9999 } } } }
+        branchId: { type: string, format: uuid }
+        customerId: { type: string, format: uuid }
+        paymentMethod: { type: string, enum: [CASH, TRANSFER, CREDIT, CARD] }
+        discountId: { type: string, format: uuid }
+        discountCode: { type: string, maxLength: 40 }
+        amountPaid: { oneOf: [{ type: number, minimum: 0 }, { type: string, pattern: '^\d+(\.\d{1,2})?$' }] }
+        email: { type: string, format: email }
+    PublicOrderPayment:
+      type: object
+      required: [id, status, paymentProvider, paymentReference, bankDetails, delivery]
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [PENDING, AWAITING_PAYMENT, PAID, SHIPPED, CANCELLED, REFUNDED, FAILED] }
+        paymentProvider: { type: [string, 'null'] }
+        paymentReference: { type: [string, 'null'] }
+        bankDetails: { type: [object, 'null'], additionalProperties: true }
+        delivery: { type: [object, 'null'], additionalProperties: true }
+    WalletOverview:
+      type: object
+      required: [wallet, recentEntries]
+      properties:
+        wallet: { type: object, required: [currency, available, pending, withdrawn, totalCredits], properties: { currency: { type: string }, available: { type: string }, pending: { type: string }, withdrawn: { type: string }, totalCredits: { type: string } } }
+        recentEntries: { type: array, maxItems: 25, items: { $ref: '#/components/schemas/WalletEntry' } }
+    WalletEntry:
+      type: object
+      required: [id, type, source, amount, balanceAfter, orderId, payoutId, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [CREDIT, DEBIT] }
+        source: { type: string, enum: [ORDER_PAYMENT, WITHDRAWAL, WITHDRAWAL_REVERSAL, ADJUSTMENT] }
+        amount: { type: string }
+        balanceAfter: { type: string }
+        orderId: { type: [string, 'null'], format: uuid }
+        payoutId: { type: [string, 'null'], format: uuid }
+        createdAt: { type: string, format: date-time }
+    BankAccount:
+      type: object
+      required: [id, accountName, bankName, bankCode, maskedAccountNumber, isDefault, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        accountName: { type: string }
+        bankName: { type: string }
+        bankCode: { type: string }
+        maskedAccountNumber: { type: string }
+        isDefault: { type: boolean }
+        createdAt: { type: string, format: date-time }
+    CreateBankAccountRequest:
+      type: object
+      additionalProperties: false
+      required: [accountNumber, bankName, bankCode]
+      properties:
+        accountName: { type: string, description: Optional name checked against Paystack's resolved account name. }
+        accountNumber: { type: string, pattern: '^\d{10}$' }
+        bankName: { type: string, minLength: 1 }
+        bankCode: { type: string, pattern: '^\d{3}$' }
+        isDefault: { type: boolean }
+    Payout:
+      type: object
+      required: [id, reference, amount, status, createdAt, processedAt, bankAccount]
+      properties:
+        id: { type: string, format: uuid }
+        reference: { type: string }
+        amount: { type: string }
+        status: { type: string, enum: [REQUESTED, PROCESSING, SUCCESS, FAILED] }
+        createdAt: { type: string, format: date-time }
+        processedAt: { type: [string, 'null'], format: date-time }
+        bankAccount: { type: object, required: [id, maskedAccountNumber, bankName, accountName], properties: { id: { type: string, format: uuid }, maskedAccountNumber: { type: [string, 'null'] }, bankName: { type: string }, accountName: { type: string } } }
+    PaystackWebhook:
+      type: object
+      required: [event, data]
+      properties:
+        event: { type: string, enum: [charge.success, charge.failed, transfer.success, transfer.failed] }
+        data: { type: object, required: [id, reference], properties: { id: { type: string, description: Event ID used for deduplication. }, reference: { type: string, description: Order ord_ reference or withdrawal wd_ reference. }, status: { type: string }, transfer_code: { type: string }, fee: { type: number } } }
+    Tier:
+      type: string
+      enum: [STARTER, PRO, ENTERPRISE]
+    TierRequest:
+      type: object
+      additionalProperties: false
+      required: [tier]
+      properties:
+        tier: { $ref: '#/components/schemas/Tier' }
+    SubscriptionPayment:
+      type: object
+      required: [id, tier, kind, status, reference, amount, paidAt, createdAt, orphanReason]
+      properties:
+        id: { type: string, format: uuid }
+        tier: { $ref: '#/components/schemas/Tier' }
+        kind: { type: string, enum: [SUBSCRIPTION, UPGRADE] }
+        status: { type: string, enum: [PENDING, SUCCESS, FAILED, ORPHANED] }
+        reference: { type: string }
+        amount: { type: string }
+        providerRef: { type: [string, 'null'] }
+        paidAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+        orphanReason: { type: [string, 'null'] }
+    SubscriptionWebhook:
+      type: object
+      required: [event, data]
+      properties:
+        event: { type: string }
+        data: { type: object, required: [id], properties: { id: { type: string }, reference: { type: string }, status: { type: string }, amount: { type: integer, description: Paystack amount in kobo. }, plan: { type: object, properties: { plan_code: { type: string } } }, subscription: { type: object, properties: { subscription_code: { type: string }, email_token: { type: string }, status: { type: string } } }, subscription_code: { type: string }, email_token: { type: string } } }
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error: { type: object, required: [code, message], properties: { code: { type: string }, message: { type: string }, details: { type: [string, 'null'] } } }
+  responses:
+    ValidationError:
+      description: Invalid request data
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: VALIDATION_ERROR, message: Request validation failed } }
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: UNAUTHORIZED, message: Authentication required } }
+    Forbidden:
+      description: Authenticated account lacks the required role or permission
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: FORBIDDEN, message: Not allowed } }
+    NotFound:
+      description: Requested resource not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: NOT_FOUND, message: Resource not found } }
+    Conflict:
+      description: Current state or available balance prevents the operation
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: CONFLICT, message: Operation conflicts with current state } }
+    ProviderError:
+      description: Paystack could not complete the operation
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: PAYMENT_PROVIDER_ERROR, message: Payment provider could not complete the operation } }
+

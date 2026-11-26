@@ -14,8 +14,10 @@ subdomain are never part of registration.
 On success the account is already logged in — access and refresh tokens
 are returned in the response — but the email is NOT yet verified: a
 single-use verification token is issued, a verification email is sent
-to the address, and `verified` is `false`. The user follows the email
-link (`FRONTEND_URL/verify?token=<token>`), the frontend presents it at
+to the address, and `verified` is `false`. The email link is
+`https://<FRONTEND_URL-host>/verify-email?token=<token>` and opens the
+native app through Universal Links/App Links when installed, with the
+web app as fallback. The client presents the token at
 `POST /api/public/auth/verify`, and only then may the account onboard —
 `POST /api/dashboard/onboarding` rejects an unverified account with
 `403 VERIFICATION_REQUIRED`. The session works for `/me` and

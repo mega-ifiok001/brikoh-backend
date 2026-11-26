@@ -113,15 +113,24 @@ export function createApp(): Express {
 
   app.use(requestLogger);
 
-  // Interactive OpenAPI reference for authentication endpoints. The UI
-  // assets are served locally by swagger-ui-express; only the spec is static.
+  // Interactive OpenAPI reference for authentication and payments. The UI
+  // assets are served locally by swagger-ui-express; only the specs are static.
   app.use("/api-docs/openapi", express.static("public/openapi", { fallthrough: false }));
   app.use(
     "/api-docs",
     swaggerUi.serve,
     swaggerUi.setup(undefined, {
-      swaggerOptions: { url: "/api-docs/openapi/auth.yaml", persistAuthorization: false },
-      customCss: ".topbar { display: none }",
+      // swagger-ui-express hides the URL selector unless explorer mode is on.
+      explorer: true,
+      swaggerOptions: {
+        urls: [
+          { url: "/api-docs/openapi/auth.yaml", name: "Authentication" },
+          { url: "/api-docs/openapi/users.yaml", name: "Users" },
+          { url: "/api-docs/openapi/payments.yaml", name: "Payments" },
+        ],
+        "urls.primaryName": "Authentication",
+        persistAuthorization: false,
+      },
     }),
   );
 

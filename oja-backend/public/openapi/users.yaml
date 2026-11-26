@@ -1,0 +1,595 @@
+openapi: 3.1.0
+info:
+  title: Brikoh Users API
+  version: 1.0.0
+  description: |
+    Merchant account profile and lifecycle, staff membership and invitations, platform-admin
+    user views, and merchant-managed customer records. Registration, sign-in, email verification,
+    and forgotten-password flows are documented in the Authentication API spec. Dashboard routes
+    require a merchant bearer access token plus the stated permission/role.
+servers:
+  - url: /
+    description: Same origin as the Brikoh API
+security: []
+tags:
+  - name: Merchant account
+  - name: Staff and invitations
+  - name: Platform-admin user views
+  - name: Customer directory
+paths:
+  /api/dashboard/me:
+    get:
+      tags: [Merchant account]
+      summary: Get the signed-in user's profile, tenant context, and permissions
+      operationId: getCurrentMerchantUser
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200':
+          description: Account identity and current store membership, if any
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CurrentUser' }
+              example:
+                accountId: 8d40aa48-458b-4a61-90fd-e7567076dd00
+                email: ada.okafor@example.com
+                firstName: Ada
+                lastName: Okafor
+                phone: '+234 801 234 5678'
+                role: OWNER
+                storeId: d35fc8ea-714c-4a5c-9679-2e002321a873
+                storeName: Ada Market
+                subdomain: ada-market
+                needsOnboarding: false
+                verified: true
+                permissions: [all]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/dashboard/onboarding:
+    post:
+      tags: [Merchant account]
+      summary: Set up the new user's first store
+      description: Requires a verified email and an authenticated account. Store subdomain is derived by the server from the store name; it is not accepted in the request.
+      operationId: onboardMerchantAccount
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OnboardingRequest' }
+            example: { name: Ada Market, businessType: RETAIL, location: Lagos, Nigeria, currency: NGN, businessPhone: '+234 801 234 5678' }
+      responses:
+        '201':
+          description: Store created; the new owner profile is returned
+          content:
+            application/json:
+              schema: { type: object, required: [user], properties: { user: { $ref: '#/components/schemas/CurrentUser' } } }
+              example:
+                user:
+                  accountId: 8d40aa48-458b-4a61-90fd-e7567076dd00
+                  email: ada.okafor@example.com
+                  firstName: Ada
+                  lastName: Okafor
+                  phone: '+234 801 234 5678'
+                  role: OWNER
+                  storeId: d35fc8ea-714c-4a5c-9679-2e002321a873
+                  storeName: Ada Market
+                  subdomain: ada-market
+                  needsOnboarding: false
+                  verified: true
+                  permissions: [all]
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/dashboard/resend-verification:
+    post:
+      tags: [Merchant account]
+      summary: Send a new email-verification code to the signed-in account
+      description: Requires authentication. Enforces a resend cooldown and request quota. The code is sent by email and is not returned.
+      operationId: resendMerchantVerificationCode
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200':
+          description: Resend request handled
+          content:
+            application/json:
+              schema: { type: object, required: [sent], properties: { sent: { type: boolean } } }
+              example: { sent: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/dashboard/settings/password:
+    post:
+      tags: [Merchant account]
+      summary: Change the signed-in user's password
+      description: Requires authentication. Existing password must be correct; new password must contain at least eight characters, a letter, and a digit.
+      operationId: changeMerchantPassword
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChangePasswordRequest' }
+            example: { currentPassword: TestPass123, newPassword: NewPass456, confirmPassword: NewPass456 }
+      responses:
+        '200': { description: Password changed, content: { application/json: { schema: { type: object, required: [ok], properties: { ok: { type: boolean, const: true } } }, example: { ok: true } } } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/dashboard/account:
+    delete:
+      tags: [Merchant account]
+      summary: Delete the signed-in account
+      description: Permanently deletes the account and, if it owns a store, the store and tenant data. This is irreversible.
+      operationId: deleteMerchantAccount
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200': { description: Account deleted, content: { application/json: { schema: { type: object, required: [ok], properties: { ok: { type: boolean, const: true } } }, example: { ok: true } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/dashboard/staff:
+    get:
+      tags: [Staff and invitations]
+      summary: List staff members for the current store
+      description: Owner-only. Staff records include role, explicit permission flags, active state, and creation time.
+      operationId: listStoreStaff
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200': { description: Store staff members, content: { application/json: { schema: { $ref: '#/components/schemas/StaffList' }, example: { items: [{ id: 047e75cf-e245-4f42-9c14-7a79d371e78c, email: staff@example.com, role: STAFF, permissions: [orders.manage], isActive: true, createdAt: '2026-11-20T10:30:00.000Z' }] } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/dashboard/staff/{staffId}:
+    patch:
+      tags: [Staff and invitations]
+      summary: Change a staff member's role, permissions, or active state
+      description: Owner-only. Provide at least one field. Deactivating a member revokes their refresh sessions.
+      operationId: updateStoreStaff
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: staffId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StaffUpdateRequest' }
+            example: { role: MANAGER, permissions: [orders.manage, customers.manage], isActive: true }
+      responses:
+        '200': { description: Updated staff record, content: { application/json: { schema: { $ref: '#/components/schemas/StaffMember' }, example: { id: 047e75cf-e245-4f42-9c14-7a79d371e78c, email: staff@example.com, role: MANAGER, permissions: [orders.manage, customers.manage], isActive: true, updatedAt: '2026-11-20T11:00:00.000Z' } } } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Staff and invitations]
+      summary: Remove a staff member from the store
+      description: Owner-only. Removes the store membership and revokes the member's refresh tokens; it does not delete the person's account.
+      operationId: removeStoreStaff
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: staffId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Staff membership removed; no response body }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/dashboard/staff/invites:
+    get:
+      tags: [Staff and invitations]
+      summary: List pending staff invitations
+      operationId: listStaffInvitations
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200': { description: Pending invites for the store, content: { application/json: { schema: { $ref: '#/components/schemas/InviteList' }, example: { items: [{ id: 1b30b7b0-7dad-45ec-8aef-cde8b750d526, email: new.staff@example.com, role: STAFF, status: PENDING, expiresAt: '2026-11-27T10:00:00.000Z', createdAt: '2026-11-20T10:00:00.000Z' }] } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Staff and invitations]
+      summary: Invite a person to join this store
+      description: Owner-only. Sends a single-use invitation email. Accepting the invite creates the account and staff membership; the invite token is not returned by this endpoint.
+      operationId: createStaffInvitation
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateInviteRequest' }
+            example: { email: new.staff@example.com, role: STAFF }
+      responses:
+        '201':
+          description: Invite created and email delivery attempted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InviteCreated' }
+              example: { id: 1b30b7b0-7dad-45ec-8aef-cde8b750d526, email: new.staff@example.com, role: STAFF, status: PENDING, expiresAt: '2026-11-27T10:00:00.000Z', expiresInSeconds: 604800 }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/dashboard/staff/invites/{inviteId}:
+    delete:
+      tags: [Staff and invitations]
+      summary: Revoke a pending staff invitation
+      operationId: revokeStaffInvitation
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: inviteId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Invitation revoked; no response body }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/public/auth/accept-invite/{token}:
+    get:
+      tags: [Staff and invitations]
+      summary: Preview a staff invitation before accepting it
+      description: Public. The invitation token is the credential. Expired, accepted, revoked, or invalid tokens are rejected.
+      operationId: previewStaffInvitation
+      parameters:
+        - { name: token, in: path, required: true, schema: { type: string, example: inv_fake_url_safe_token } }
+      responses:
+        '200':
+          description: Store, inviter, role, and invitee email safe to display in the acceptance screen
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InvitePreview' }
+              example: { email: new.staff@example.com, storeName: Ada Market, role: STAFF, inviterEmail: owner@example.com, expiresAt: '2026-11-27T10:00:00.000Z' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+  /api/public/auth/accept-invite:
+    post:
+      tags: [Staff and invitations]
+      summary: Accept a staff invitation and create the invited account
+      description: Public. The invite is single-use and expires. The invitee chooses a password and receives a merchant access/refresh token pair.
+      operationId: acceptStaffInvitation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AcceptInviteRequest' }
+            example: { token: inv_fake_url_safe_token, password: StaffPass123 }
+      responses:
+        '201':
+          description: Invite accepted and account signed in
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AcceptedInvite' }
+              example:
+                accessToken: eyJhbGciOi...fake-access-token
+                refreshToken: rt_fake-token-id.fake-secret
+                user: { accountId: 65b95b1e-45e0-49e1-97c1-54156c3c3a42, email: new.staff@example.com, role: STAFF, storeId: d35fc8ea-714c-4a5c-9679-2e002321a873, storeName: Ada Market, subdomain: ada-market, staffMemberId: 047e75cf-e245-4f42-9c14-7a79d371e78c }
+        '400': { $ref: '#/components/responses/ValidationError' }
+  /api/admin/me:
+    get:
+      tags: [Platform-admin user views]
+      summary: Get the signed-in platform administrator's identity
+      operationId: getCurrentPlatformAdmin
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200': { description: Platform-admin identity, content: { application/json: { schema: { type: object, additionalProperties: true }, example: { id: 1a1c59fd-d378-4f16-a834-b17f22991120, email: admin@example.com, roleName: SUPER_ADMIN, permissions: [admin:overview.view, admin:merchants.view] } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/admin/merchants:
+    get:
+      tags: [Platform-admin user views]
+      summary: Search and list merchant accounts
+      description: Requires admin:merchants.view. Results are cursor-paginated; each request is audited.
+      operationId: listPlatformMerchants
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: q, in: query, schema: { type: string, minLength: 1, maxLength: 200 }, description: Search term. }
+        - { name: cursor, in: query, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+      responses:
+        '200': { description: Merchant account page, content: { application/json: { schema: { type: object, additionalProperties: true }, example: { items: [{ id: d35fc8ea-714c-4a5c-9679-2e002321a873, storeName: Ada Market, ownerName: Ada Okafor, ownerEmail: ada.okafor@example.com, tier: pro, subscriptionStatus: ACTIVE, gmvLast30d: 8500, gmvCurrency: NGN, orderCount: 12, createdAt: '2026-11-20T10:00:00.000Z' }], nextCursor: null } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/admin/staff:
+    get:
+      tags: [Platform-admin user views]
+      summary: List platform-admin staff accounts
+      description: Requires admin:staff.view. This lists Brikoh platform administrators, not merchant-store staff.
+      operationId: listPlatformAdminStaff
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200': { description: Admin staff list, content: { application/json: { schema: { type: object, additionalProperties: true }, example: { items: [{ id: 1a1c59fd-d378-4f16-a834-b17f22991120, email: admin@example.com, roleName: SUPPORT, isActive: true, createdAt: '2026-11-20T10:00:00.000Z', session: null }] } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/dashboard/customers:
+    get:
+      tags: [Customer directory]
+      summary: List customers in the current store
+      description: Requires customers.manage. Credit totals, purchase totals, customer segment, and group membership are derived by the service.
+      operationId: listCustomers
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: q, in: query, schema: { type: string, minLength: 1, maxLength: 200 } }
+        - { name: hasOutstandingCredit, in: query, schema: { type: string, enum: ['true', 'false'] } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+        - { name: cursor, in: query, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Cursor-paginated customer page, content: { application/json: { schema: { $ref: '#/components/schemas/CustomerPage' }, example: { items: [{ id: 5c1389c1-8da8-4df2-ac57-098146d4e5d3, name: Ade Buyer, phone: '+2348012345678', email: buyer@example.com, group: { id: 4b7d5200-f2ba-4ef4-a151-166c1d8fe0b3, name: General }, source: STOREFRONT, segment: NEW, ordersCount: 2, totalSpent: '8500.00', openCredit: '0.00', hasOutstandingCredit: false, createdAt: '2026-11-20T10:00:00.000Z' }], nextCursor: null } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Customer directory]
+      summary: Add a customer to the store address book
+      description: Requires customers.manage. POS and storefront checkouts can also create customer records automatically.
+      operationId: createCustomer
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CustomerCreateRequest' }
+            example: { name: Ade Buyer, phone: '+2348012345678', email: buyer@example.com, groupId: 4b7d5200-f2ba-4ef4-a151-166c1d8fe0b3 }
+      responses:
+        '201': { description: Created customer, content: { application/json: { schema: { type: object, additionalProperties: true }, example: { id: 5c1389c1-8da8-4df2-ac57-098146d4e5d3, name: Ade Buyer, phone: '+2348012345678', email: buyer@example.com } } } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/dashboard/customers/{customerId}:
+    get:
+      tags: [Customer directory]
+      summary: Get customer profile, activity, and credit overview
+      operationId: getCustomer
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: customerId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Customer details and timeline, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Customer directory]
+      summary: Update customer contact details or group
+      operationId: updateCustomer
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: customerId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CustomerUpdateRequest' }
+            example: { email: updated@example.com, phone: null }
+      responses:
+        '200': { description: Updated customer, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Customer directory]
+      summary: Delete a customer record
+      operationId: deleteCustomer
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: customerId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Customer deleted, content: { application/json: { schema: { type: object, required: [ok], properties: { ok: { type: boolean, const: true } } }, example: { ok: true } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/dashboard/customers/export.csv:
+    get:
+      tags: [Customer directory]
+      summary: Export the store customer directory as CSV
+      operationId: exportCustomersCsv
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200': { description: CSV file attachment, content: { text/csv: { schema: { type: string, example: "name,email,phone\\nAde Buyer,buyer@example.com,+2348012345678" } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/dashboard/customers/import:
+    post:
+      tags: [Customer directory]
+      summary: Import customers from CSV
+      description: Requires customers.manage. Send raw text/csv, up to 2 MB.
+      operationId: importCustomersCsv
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          text/csv:
+            schema: { type: string, example: "name,email,phone\\nAde Buyer,buyer@example.com,+2348012345678" }
+      responses:
+        '201': { description: Import summary, content: { application/json: { schema: { type: object, additionalProperties: true }, example: { imported: 1, skipped: 0, errors: [] } } } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Merchant JWT on dashboard routes; platform-admin tokens are separate and used only with /api/admin endpoints.
+  schemas:
+    CurrentUser:
+      type: object
+      required: [accountId, email, firstName, lastName, phone, role, storeId, storeName, subdomain, needsOnboarding, verified]
+      properties:
+        accountId: { type: string, format: uuid }
+        email: { type: string, format: email }
+        firstName: { type: string }
+        lastName: { type: string }
+        phone: { type: [string, 'null'] }
+        role: { type: [string, 'null'], enum: [OWNER, ADMIN, MANAGER, STAFF, null] }
+        storeId: { type: [string, 'null'], format: uuid }
+        storeName: { type: [string, 'null'] }
+        subdomain: { type: [string, 'null'] }
+        needsOnboarding: { type: boolean }
+        verified: { type: boolean }
+        permissions: { type: array, items: { type: string } }
+    OnboardingRequest:
+      type: object
+      additionalProperties: false
+      required: [name, businessType, location, businessPhone]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120, pattern: '^[A-Za-z]+(?:\s+[A-Za-z]+)*$' }
+        businessType: { type: string, enum: [RETAIL, FOOD_AND_BEVERAGE, FASHION_AND_WEARABLES, HEALTH_AND_BEAUTY, ELECTRONICS, PROFESSIONAL_SERVICES, AGRICULTURE, OTHER] }
+        location: { type: string, minLength: 2, maxLength: 120 }
+        currency: { type: string, enum: [NGN, USD, GHS, KES, ZAR], default: NGN }
+        businessPhone: { type: string, minLength: 7, maxLength: 17 }
+        templateId: { type: string, format: uuid }
+    ChangePasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [currentPassword, newPassword, confirmPassword]
+      properties:
+        currentPassword: { type: string, minLength: 1, example: TestPass123 }
+        newPassword: { type: string, minLength: 8, pattern: '^(?=.*[A-Za-z])(?=.*\d).+$', example: NewPass456 }
+        confirmPassword: { type: string, minLength: 1, example: NewPass456 }
+    StaffMember:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        role: { type: string, enum: [ADMIN, MANAGER, STAFF] }
+        permissions: { type: array, items: { type: string }, example: [orders.manage, customers.manage] }
+        isActive: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    StaffList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/StaffMember' } }
+    StaffUpdateRequest:
+      type: object
+      minProperties: 1
+      properties:
+        role: { type: string, enum: [ADMIN, MANAGER, STAFF] }
+        permissions: { type: array, items: { type: string }, example: [orders.manage] }
+        isActive: { type: boolean }
+    CreateInviteRequest:
+      type: object
+      required: [email, role]
+      properties:
+        email: { type: string, format: email }
+        role: { type: string, enum: [ADMIN, MANAGER, STAFF] }
+    InviteCreated:
+      type: object
+      required: [id, email, role, status, expiresAt, expiresInSeconds]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        role: { type: string, enum: [ADMIN, MANAGER, STAFF] }
+        status: { type: string, const: PENDING }
+        expiresAt: { type: string, format: date-time }
+        expiresInSeconds: { type: integer }
+    InviteList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/PendingInvite' } }
+    PendingInvite:
+      type: object
+      required: [id, email, role, status, expiresAt, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        role: { type: string, enum: [ADMIN, MANAGER, STAFF] }
+        status: { type: string, const: PENDING }
+        expiresAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+    InvitePreview:
+      type: object
+      required: [email, storeName, role, inviterEmail, expiresAt]
+      properties:
+        email: { type: string, format: email }
+        storeName: { type: string }
+        role: { type: string, enum: [ADMIN, MANAGER, STAFF] }
+        inviterEmail: { type: string, description: May be empty if the store no longer has an owner account. }
+        expiresAt: { type: string, format: date-time }
+    AcceptInviteRequest:
+      type: object
+      required: [token, password]
+      properties:
+        token: { type: string, example: inv_fake_url_safe_token }
+        password: { type: string, minLength: 8, pattern: '^(?=.*[A-Za-z])(?=.*\d).+$' }
+    AcceptedInvite:
+      type: object
+      required: [accessToken, refreshToken, user]
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        user: { type: object, additionalProperties: true }
+    CustomerCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        phone: { type: [string, 'null'], minLength: 7, maxLength: 17 }
+        email: { type: [string, 'null'], format: email }
+        groupId: { type: [string, 'null'], format: uuid }
+    CustomerUpdateRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        phone: { type: [string, 'null'], minLength: 7, maxLength: 17 }
+        email: { type: [string, 'null'], format: email }
+        groupId: { type: [string, 'null'], format: uuid }
+    CustomerSummary:
+      type: object
+      required: [id, name, phone, email, group, source, segment, ordersCount, totalSpent, openCredit, hasOutstandingCredit, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        phone: { type: [string, 'null'] }
+        email: { type: [string, 'null'], format: email }
+        group: { type: [object, 'null'], additionalProperties: true }
+        source: { type: string, enum: [STOREFRONT, POS, IMPORTED, MANUAL] }
+        segment: { type: string, enum: [NEW, REGULAR, VIP] }
+        ordersCount: { type: integer }
+        totalSpent: { type: string }
+        openCredit: { type: string }
+        hasOutstandingCredit: { type: boolean }
+        createdAt: { type: string, format: date-time }
+    CustomerPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/CustomerSummary' } }
+        nextCursor: { type: [string, 'null'], format: uuid }
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error: { type: object, required: [code, message], properties: { code: { type: string }, message: { type: string }, details: { type: [string, 'null'] } } }
+  responses:
+    ValidationError:
+      description: Request is invalid or failed validation
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: VALIDATION_ERROR, message: Request validation failed } }
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: UNAUTHORIZED, message: Authentication required } }
+    Forbidden:
+      description: Account lacks the required role or permission
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: FORBIDDEN, message: Not allowed } }
+    NotFound:
+      description: Requested resource was not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: NOT_FOUND, message: Resource not found } }
+    Conflict:
+      description: Requested operation conflicts with current account or resource state
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: CONFLICT, message: Operation conflicts with current state } }
+    RateLimited:
+      description: Too many requests
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: RATE_LIMITED, message: Too many requests } }
+

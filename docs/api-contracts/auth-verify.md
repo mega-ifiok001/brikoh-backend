@@ -7,9 +7,18 @@ Rate-limited: yes
 
 Verifies an account's email address by consuming the single-use token
 from the verification email sent at registration (or by a resend). The
-token travels in the email link — `FRONTEND_URL/verify?token=<token>` —
-and is presented by the frontend, which then redirects the user to the
-onboarding screen.
+email link is `https://<FRONTEND_URL-host>/verify-email?token=<token>`.
+The same HTTPS link is registered as an iOS Universal Link and Android
+App Link: supported devices open the Brikoh app; otherwise the web app
+handles `/verify-email`. The app/web client reads the query token and
+submits it in the JSON body below. Opening the URL itself does not
+verify the account; verification always occurs through this POST.
+
+After a successful response, the client should show confirmation and
+continue to onboarding. An invalid/expired link returns
+`VERIFICATION_INVALID`; show a helpful recovery message and offer to
+resend verification (the resend endpoint requires an authenticated
+session). An already-verified account resolves successfully.
 
 Verification is required before onboarding: `POST
 /api/dashboard/onboarding` rejects an unverified account with
@@ -24,7 +33,7 @@ Body:
 
 ```json
 {
-  "token": "string — vrf_<token>, from the verification email link"
+  "token": "string — vrf_<token>, parsed from the /verify-email link query"
 }
 ```
 
