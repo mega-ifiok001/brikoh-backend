@@ -137,6 +137,7 @@ Error body shape (uniform across the API):
 - [Wallet bank accounts](dashboard-bank-accounts.md)
 - [Merchant settlement bank accounts](dashboard-merchant-bank-accounts.md)
 - [Dashboard delivery options](dashboard-delivery-options.md)
+- [Shipbubble delivery integration](shipbubble-integration.md)
 - [Wallet withdrawals](dashboard-withdrawals.md)
 - [Dashboard expenses](dashboard-expenses.md)
 - [Dashboard reports — P&L and expense breakdown](dashboard-reports.md)

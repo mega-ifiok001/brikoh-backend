@@ -14,6 +14,7 @@ import {
   listDeliveryOptions,
   updateDeliveryOption,
 } from "./delivery-options.service.js";
+import { configureShipbubble, getShipbubbleConfig } from "./shipbubble.service.js";
 
 function requireTenant(req: Request): { storeId: string } {
   const tenant = req.tenant;
@@ -175,6 +176,33 @@ export async function deleteDeliveryOptionHandler(
     const { storeId } = requireTenant(req);
     await deleteDeliveryOption(storeId, optionIdParam(req), req.tenant?.staffMemberId);
     res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** GET/PUT /api/dashboard/settings/shipbubble */
+export async function getShipbubbleConfigHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { storeId } = requireTenant(req);
+    res.status(200).json(await getShipbubbleConfig(storeId));
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function configureShipbubbleHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { storeId } = requireTenant(req);
+    res.status(200).json(await configureShipbubble(storeId, req.tenant?.staffMemberId, req.body));
   } catch (err) {
     next(err);
   }

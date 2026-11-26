@@ -106,6 +106,7 @@ export async function updateFulfillment(
       courierPhone: true,
       shipmentReference: true,
       trackingUrl: true,
+      shipbubbleShipment: { select: { bookingState: true } },
     },
   });
   if (order === null) throw new AppError(404, "ORDER_NOT_FOUND", "Order not found");
@@ -124,8 +125,18 @@ export async function updateFulfillment(
 
   // Merchant-managed orders may record any rider/courier. Provider booking
   // fields are populated only by the server-side provider integration.
-  if (order.deliveryProvider === "shipbubble" && data.status !== order.fulfillmentStatus) {
-    throw new AppError(409, "PROVIDER_MANAGED_FULFILLMENT", "Shipbubble shipment updates are provider-managed");
+  if (order.deliveryProvider === "shipbubble") {
+    const allowedMerchantStatuses: FulfillmentStatus[] = ["CONFIRMED", "PREPARING"];
+    if (
+      order.shipbubbleShipment !== null ||
+      !allowedMerchantStatuses.includes(data.status) ||
+      data.courierName !== undefined ||
+      data.courierPhone !== undefined ||
+      data.shipmentReference !== undefined ||
+      data.trackingUrl !== undefined
+    ) {
+      throw new AppError(409, "PROVIDER_MANAGED_FULFILLMENT", "Shipbubble controls shipment status and courier details after booking");
+    }
   }
 
   if (idempotencyKey !== undefined && (idempotencyKey.length < 8 || idempotencyKey.length > 200)) {

@@ -2,6 +2,7 @@ import { Router } from "express";
 import {
   paystackSubscriptionWebhookHandler,
   paystackWebhookHandler,
+  shipbubbleWebhookHandler,
 } from "./controller.js";
 
 const webhooksRouter: Router = Router();
@@ -15,5 +16,8 @@ webhooksRouter.post("/paystack", paystackWebhookHandler);
 // separate signature domain (PLATFORM_PAYSTACK_SECRET_KEY) from the order
 // webhook above.
 webhooksRouter.post("/paystack-subscriptions", paystackSubscriptionWebhookHandler);
+// Shipbubble's published webhook docs do not specify a signature header;
+// the configured high-entropy callback path is the bearer credential.
+webhooksRouter.post("/shipbubble/:webhookSecret", shipbubbleWebhookHandler);
 
 export { webhooksRouter };

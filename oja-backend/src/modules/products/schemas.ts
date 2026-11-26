@@ -43,6 +43,17 @@ export const costPriceSchema = z
   )
   .transform((value) => value.toFixed(2));
 
+export const shippingWeightKgSchema = z
+  .union([
+    z.number(),
+    z.string().regex(/^\d+(?:\.\d{1,3})?$/, "shippingWeightKg must have at most 3 decimal places"),
+  ])
+  .transform((value) => Number(value))
+  .refine((value) => Number.isFinite(value) && value >= 0.001, "shippingWeightKg must be at least 0.001 kg")
+  .refine((value) => value <= 99999.999, "shippingWeightKg is too large")
+  .refine((value) => Math.abs(value * 1000 - Math.round(value * 1000)) < 1e-8, "shippingWeightKg must have at most 3 decimal places")
+  .transform((value) => value.toFixed(3));
+
 const nameSchema = z
   .string()
   .trim()
@@ -239,6 +250,7 @@ export const createProductSchema = z
     images: imagesSchema.optional().default([]),
     coverImageUrl: coverImageUrlSchema.optional(),
     discountPrice: discountPriceSchema.optional().nullable(),
+    shippingWeightKg: shippingWeightKgSchema.optional().nullable(),
     lowStockThreshold: lowStockThresholdSchema.optional(),
     expiryDate: expiryDateSchema.optional(),
     categoryId: catalogRefSchema.optional().nullable(),
@@ -290,6 +302,7 @@ export const updateProductSchema = z
     images: imagesSchema,
     coverImageUrl: coverImageUrlSchema,
     discountPrice: discountPriceSchema.nullable(),
+    shippingWeightKg: shippingWeightKgSchema.nullable(),
     lowStockThreshold: lowStockThresholdSchema,
     expiryDate: expiryDateSchema,
     categoryId: catalogRefSchema.nullable(),

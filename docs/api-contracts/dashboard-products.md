@@ -35,6 +35,7 @@ product belonging to another store is indistinguishable from a missing one
   "sku": "string | null — optional, up to 64 chars; the merchant's product-level SKU (variants carry their own sku)",
   "price": "string — decimal, stored with exactly 2dp but serialized without forced trailing zeros, e.g. \"19.99\" or \"8\" (JSON-safe string, never a float)",
   "costPrice": "string | null — decimal, same serialization rules as price; the merchant's cost basis, never shown at checkout",
+  "shippingWeightKg": "string | null — product shipping weight in kilograms (up to 3 decimals); required for Shipbubble checkout",
   "description": "string | null — up to 2000 chars",
   "images": ["string — array of public image URLs, max 10"],
   "coverImageUrl": "string | null — the primary photo shown in listings and checkout",
@@ -104,6 +105,7 @@ Body:
   "sku": "string | null — optional, trimmed, up to 64 chars; product-level SKU",
   "price": "number or string — required, > 0, at most 2 decimal places, max 99999999.99",
   "costPrice": "number or string — optional (null when absent), >= 0, at most 2 decimal places, max 99999999.99",
+  "shippingWeightKg": "number or string | null — optional shipping weight in kg, 0.001..99999.999, at most 3 decimal places; required to request Shipbubble rates",
   "description": "string | null — optional, up to 2000 chars",
   "images": "string[] — optional, max 10 URLs",
   "coverImageUrl": "string | null — optional, valid URL, up to 2048 chars",
@@ -178,7 +180,7 @@ cross-tenant ids and soft-deleted products).
 
 ## PATCH /api/dashboard/products/:productId
 
-Body: any subset of `name`, `sku`, `price`, `costPrice`, `description`,
+Body: any subset of `name`, `sku`, `price`, `costPrice`, `shippingWeightKg`, `description`,
 `images`, `coverImageUrl`, `discountPrice`, `lowStockThreshold`,
 `expiryDate`, `categoryId`, `unitId` (same rules as create). Absent
 fields are unchanged; `sku: null`, `costPrice: null`, `description: null`,
